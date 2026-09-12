@@ -15,7 +15,11 @@ from telegram.ext import (
     filters,
 )
 
-from translator import UnifiedTranslationService, detect_target_language
+from translator import (
+    UnifiedTranslationService,
+    detect_source_language,
+    get_translation_targets,
+)
 
 # 로깅 설정
 logging.basicConfig(
@@ -58,7 +62,7 @@ def save_chat_settings(settings: dict):
 
 
 # 전역 설정 메모리 캐시:
-# { "chat_id": {"enabled": bool, "authenticated": bool} }
+# { "chat_id": {"enabled": bool, "authenticated": bool, "lang_mode": "all"|"ko-en"|"ko-vi"} }
 chat_settings = load_chat_settings()
 
 
@@ -75,7 +79,7 @@ def is_chat_authenticated(chat_id: int) -> bool:
 def set_chat_authenticated(chat_id: int, authenticated: bool):
     str_id = str(chat_id)
     if str_id not in chat_settings or not isinstance(chat_settings[str_id], dict):
-        chat_settings[str_id] = {"enabled": True, "authenticated": authenticated}
+        chat_settings[str_id] = {"enabled": True, "authenticated": authenticated, "lang_mode": "all"}
     else:
         chat_settings[str_id]["authenticated"] = authenticated
     save_chat_settings(chat_settings)
@@ -94,9 +98,26 @@ def is_translation_enabled(chat_id: int) -> bool:
 def set_translation_enabled(chat_id: int, enabled: bool):
     str_id = str(chat_id)
     if str_id not in chat_settings or not isinstance(chat_settings[str_id], dict):
-        chat_settings[str_id] = {"enabled": enabled, "authenticated": True}
+        chat_settings[str_id] = {"enabled": enabled, "authenticated": True, "lang_mode": "all"}
     else:
         chat_settings[str_id]["enabled"] = enabled
+    save_chat_settings(chat_settings)
+
+
+def get_chat_lang_mode(chat_id: int) -> str:
+    """채팅방 언어 모드 반환 (기본값: 'all')"""
+    conf = chat_settings.get(str(chat_id), {})
+    if isinstance(conf, dict):
+        return conf.get("lang_mode", "all")
+    return "all"
+
+
+def set_chat_lang_mode(chat_id: int, mode: str):
+    str_id = str(chat_id)
+    if str_id not in chat_settings or not isinstance(chat_settings[str_id], dict):
+        chat_settings[str_id] = {"enabled": True, "authenticated": True, "lang_mode": mode}
+    else:
+        chat_settings[str_id]["lang_mode"] = mode
     save_chat_settings(chat_settings)
 
 
@@ -104,7 +125,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """봇 시작 및 안내 메시지"""
     chat_id = update.effective_chat.id
 
-    # 비밀번호가 걸려있는데 인증되지 않은 경우
     if ACCESS_PASSWORD and not is_chat_authenticated(chat_id):
         await update.effective_message.reply_text(
             "🔒 **보안 잠금 상태입니다.**\n\n"
@@ -115,22 +135,54 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    engine_name = translation_service.get_engine_name()
+    mode = get_chat_lang_mode(chat_id)
+    mode_desc = "한-영-베 3개국어 통합 모드" if mode == "all" else ("한-베 전용 모드" if mode == "ko-vi" else "한-영 전용 모드")
+
     text = (
-        "👋 안녕하세요! **한-영 / 영-한 실시간 자동 번역 봇**입니다.\n\n"
-        "대화방에 한국어를 입력하면 **영어(🇺🇸)**로,\n"
-        "영어를 입력하면 **한국어(🇰🇷)**로 자동으로 번역하여 답장해 드립니다.\n\n"
-        f"⚙️ **현재 번역 엔진**: `{engine_name}`\n\n"
+        "👋 안녕하세요! **한·영·베 실시간 자동 번역 봇**입니다.\n\n"
+        "🇰🇷 한국어 ↔ 🇺🇸 영어 ↔ 🇻🇳 베트남어를 자동으로 감지하여 번역해 드립니다.\n\n"
+        f"🌐 **현재 언어 모드**: `{mode_desc}`\n\n"
         "📌 **주요 명령어**\n"
-        "• `/translate on` : 이 대화방의 자동 번역 켜기\n"
-        "• `/translate off` : 이 대화방의 자동 번역 끄기\n"
-        "• `/status` : 대화방 인증 상태 및 번역 설정 확인\n"
-        "• `/help` : 사용 안내 보기\n\n"
-        "⚠️ **그룹방 적용 시 주의사항**\n"
-        "그룹방에서 모든 대화를 감지하려면 `@BotFather`에서 **Group Privacy**를 꺼주시거나 (`/setprivacy` -> `Disable`), "
-        "봇을 그룹 관리자(Admin)로 지정해 주셔야 합니다."
+        "• `/lang all` : 한·영·베 3개국어 동시 번역 모드 (기본)\n"
+        "• `/lang ko-vi` : 한-베 전용 모드 (한국어 ↔ 베트남어)\n"
+        "• `/lang ko-en` : 한-영 전용 모드 (한국어 ↔ 영어)\n"
+        "• `/translate on/off` : 자동 번역 켜기/끄기\n"
+        "• `/status` : 대화방 인증 및 설정 상태 확인\n"
+        "• `/help` : 도움말 보기"
     )
     await update.effective_message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """언어 모드 변경 (/lang all | ko-vi | ko-en)"""
+    chat_id = update.effective_chat.id
+
+    if ACCESS_PASSWORD and not is_chat_authenticated(chat_id):
+        await update.effective_message.reply_text("🔒 비밀번호 인증이 필요합니다. `/auth [비밀번호]`를 먼저 입력해 주세요.", parse_mode="Markdown")
+        return
+
+    args = context.args
+    if not args or args[0].lower() not in ["all", "ko-vi", "ko-en"]:
+        current = get_chat_lang_mode(chat_id)
+        await update.effective_message.reply_text(
+            f"현재 이 대화방의 언어 모드는 **`{current}`** 입니다.\n\n"
+            "변경하시려면 아래 명령어 중 하나를 입력하세요:\n"
+            "• `/lang all` : 한·영·베 통합 모드 (한국어 입력 시 영+베 동시 출력)\n"
+            "• `/lang ko-vi` : 한-베 전용 모드 (한국어 ↔ 베트남어)\n"
+            "• `/lang ko-en` : 한-영 전용 모드 (한국어 ↔ 영어)",
+            parse_mode="Markdown"
+        )
+        return
+
+    new_mode = args[0].lower()
+    set_chat_lang_mode(chat_id, new_mode)
+
+    mode_names = {
+        "all": "한·영·베 3개국어 통합 모드 🇰🇷🇺🇸🇻🇳",
+        "ko-vi": "한-베 전용 모드 🇰🇷🇻🇳",
+        "ko-en": "한-영 전용 모드 🇰🇷🇺🇸",
+    }
+    await update.effective_message.reply_text(f"✅ 언어 모드가 **{mode_names.get(new_mode)}**로 변경되었습니다.", parse_mode="Markdown")
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,7 +190,6 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     message = update.effective_message
 
-    # 보안 보호를 위해 사용자가 입력한 /auth 메시지 즉시 삭제 시도 (비밀번호 노출 방지)
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
     except Exception:
@@ -181,16 +232,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """도움말 메시지"""
     text = (
         "📖 **자동 번역 봇 도움말**\n\n"
-        "1. **작동 방식**\n"
-        "   - 한국어 입력 ➡️ 영어 번역 (🇺🇸)\n"
-        "   - 영어 입력 ➡️ 한국어 번역 (🇰🇷)\n"
-        "   - 사소한 리액션(`아멘`, `ok`, `ㅋㅋ`), 이모티콘은 자동 필터링됩니다.\n\n"
-        "2. **명령어 안내**\n"
-        "   - `/auth [비밀번호]` : 대화방 사용 승인 (비밀번호 인증)\n"
-        "   - `/deauth` : 대화방 잠금 (인증 해제)\n"
-        "   - `/translate on` : 자동 번역 활성화\n"
-        "   - `/translate off` : 자동 번역 일시 중지\n"
-        "   - `/status` : 봇 상태 및 인증 여부 확인\n"
+        "1. **지원 언어 및 동작 방식**\n"
+        "   - 🇰🇷 한국어 ↔ 🇺🇸 영어 ↔ 🇻🇳 베트남어 자동 감지 번역\n"
+        "   - 사소한 리액션(`아멘`, `Amen`, `ok`, `ㅋㅋ`), 이모티콘은 자동 필터링됩니다.\n\n"
+        "2. **주요 명령어**\n"
+        "   - `/lang all` : 한·영·베 통합 모드 (기본값)\n"
+        "   - `/lang ko-vi` : 한-베 전용 모드 (한국어 ↔ 베트남어)\n"
+        "   - `/lang ko-en` : 한-영 전용 모드 (한국어 ↔ 영어)\n"
+        "   - `/auth [비밀번호]` : 대화방 인증\n"
+        "   - `/translate on/off` : 번역 켜기/끄기\n"
+        "   - `/status` : 현재 상태 확인"
     )
     await update.effective_message.reply_text(text, parse_mode="Markdown")
 
@@ -226,6 +277,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     authenticated = is_chat_authenticated(chat_id)
     enabled = is_translation_enabled(chat_id)
+    mode = get_chat_lang_mode(chat_id)
     engine_name = translation_service.get_engine_name()
 
     security_status = "🔓 인증 완료" if authenticated else "🔒 미인증 (잠김)"
@@ -235,6 +287,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = (
         "📊 **현재 봇 상태**\n\n"
         f"• 보안 인증 상태: {security_status}\n"
+        f"• 언어 모드: `{mode}`\n"
         f"• 이 대화방 번역 활성화: {'✅ 켜짐 (ON)' if enabled else '❌ 꺼짐 (OFF)'}\n"
         f"• 현재 번역 엔진: `{engine_name}`\n"
         f"• 대화방 ID: `{chat_id}`\n"
@@ -243,12 +296,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """채팅 메시지를 감지하여 언어 판별 후 번역 답장"""
+    """채팅 메시지를 감지하여 다국어 판별 후 번역 답장"""
     message = update.effective_message
     if not message or not message.text:
         return
 
-    # 1. 봇이 작성한 메시지이거나 명령어인 경우 무시 (무한 루프 방지)
     if message.from_user and message.from_user.is_bot:
         return
     if message.text.startswith('/'):
@@ -256,7 +308,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # 2. 비밀번호 인증 확인 (인증되지 않은 경우 무시)
+    # 1. 비밀번호 인증 확인
     if ACCESS_PASSWORD and not is_chat_authenticated(chat_id):
         if update.effective_chat.type == "private":
             await message.reply_text(
@@ -264,27 +316,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "`/auth [비밀번호]` 를 입력해 잠금을 해제해 주세요.",
                 parse_mode="Markdown"
             )
-        # 그룹방인 경우 불필요한 도배 방지를 위해 무반응 처리
         return
 
-    # 3. 해당 채팅방의 번역 기능이 꺼져 있으면 무시
+    # 2. 해당 채팅방의 번역 기능이 꺼져 있으면 무시
     if not is_translation_enabled(chat_id):
         return
 
     text = message.text
 
-    # 4. 언어 판별 및 사소한 리액션(아멘 등) 필터링
-    target_lang, flag = detect_target_language(text)
-    if not target_lang:
+    # 3. 언어 감지 및 사소한 리액션 필터링
+    source_lang = detect_source_language(text)
+    if not source_lang:
         return
 
-    # 5. 번역 수행 (무료 엔진 또는 DeepL)
-    translated_text = translation_service.translate(text, target_lang=target_lang)
-    if not translated_text:
+    # 4. 방 설정 언어 모드 확인
+    mode = get_chat_lang_mode(chat_id)
+    targets = get_translation_targets(source_lang, mode=mode)
+    if not targets:
         return
+
+    # 5. 번역 수행 및 결과 조합
+    results = []
+    for target_code, flag in targets:
+        translated = translation_service.translate(text, target_lang=target_code)
+        if translated:
+            results.append(f"{flag} {translated}")
+
+    if not results:
+        return
+
+    reply_content = "\n".join(results)
 
     # 6. 원본 메시지에 인용 답장 (Quote Reply)
-    reply_content = f"{flag} {translated_text}"
     try:
         await message.reply_text(
             reply_content,
@@ -302,7 +365,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Telegram Translator Bot is active and running!")
 
     def log_message(self, format, *args):
-        # 헬스체크 ping 로그로 터미널이 도배되지 않도록 음소거
         pass
 
 
@@ -323,21 +385,16 @@ def main():
         print("\n[오류] TELEGRAM_BOT_TOKEN이 누락되었습니다. .env 파일을 확인해 주세요.\n")
         return
 
-    # Render 환경의 포트 감지 (기본 8080)
     port = int(os.getenv("PORT", "8080"))
     start_health_check_server(port)
 
     logger.info(f"텔레그램 번역 봇 초기화 (엔진: {translation_service.get_engine_name()})")
-    if ACCESS_PASSWORD:
-        logger.info("비밀번호 보안 인증 모드가 활성화되어 있습니다.")
-    else:
-        logger.info("비밀번호 미설정 (공개 모드로 실행 중)")
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # 명령어 핸들러 등록
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("deauth", cmd_deauth))
     app.add_handler(CommandHandler("translate", cmd_translate))
