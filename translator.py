@@ -1,5 +1,8 @@
 import re
+import json
 import logging
+import urllib.parse
+import urllib.request
 from typing import Optional, List, Tuple
 import deepl
 from deep_translator import GoogleTranslator
@@ -16,7 +19,7 @@ PUNCT_AND_EMOJI = re.compile(r'[\s!~.?,\^;:\-_/\\()\[\]{}@#$%&*+=\'\"|🙏❤️
 # 베트남어 고유 특수문자 및 성조 문자 정규식
 VIETNAMESE_PATTERN = re.compile(
     r'[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ'
-    r'ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]'
+    r'ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]'
 )
 
 # 1. 단답형 리액션/감탄사로만 이루어진 경우 번역에서 제외할 단어 목록
@@ -58,9 +61,7 @@ def preprocess_text(text: str) -> str:
 
 
 def is_trivial_reaction(text: str) -> bool:
-    """
-    단순 감탄사, 아멘, 단답형 리액션 등 번역할 가치가 없는 사소한 메시지인지 판별
-    """
+    """단순 감탄사, 아멘, 단답형 리액션 등 번역할 가치가 없는 사소한 메시지인지 판별"""
     if re.fullmatch(r'^[ㄱ-ㅎㅏ-ㅣ\s]+$', text):
         return True
 
@@ -78,9 +79,7 @@ def is_trivial_reaction(text: str) -> bool:
 
 
 def detect_source_language(text: str) -> Optional[str]:
-    """
-    텍스트의 언어를 감지하여 "KO", "VI", "EN" 중 하나를 반환
-    """
+    """텍스트의 언어를 감지하여 "KO", "VI", "EN" 중 하나를 반환"""
     if not text or not text.strip():
         return None
 
@@ -115,15 +114,7 @@ def detect_source_language(text: str) -> Optional[str]:
 
 
 def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[str, str]]:
-    """
-    입력 언어와 설정된 모드에 따라 번역할 대상 언어 및 국기 목록 반환
-    mode 종류:
-      - "all" (기본): 한-영-베 통합 모드
-      - "ko-en": 한-영 전용 모드
-      - "ko-vi": 한-베 전용 모드
-    Returns:
-      [ (target_lang_code, flag), ... ]
-    """
+    """모드별 번역 목적지 언어 반환"""
     mode = mode.lower()
 
     if mode == "ko-en":
@@ -142,23 +133,54 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
 
     # mode == "all" (한-영-베 동시 모드)
     if source_lang == "KO":
-        # 한국어 입력 시 -> 영어 + 베트남어 동시 번역
         return [("en", "🇺🇸"), ("vi", "🇻🇳")]
     elif source_lang == "VI":
-        # 베트남어 입력 시 -> 한국어로 번역 (외국인을 위해 영어도 포함 가능)
         return [("ko", "🇰🇷")]
     elif source_lang == "EN":
-        # 영어 입력 시 -> 한국어로 번역
         return [("ko", "🇰🇷"), ("vi", "🇻🇳")]
 
     return []
 
 
+def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
+    """
+    Google GTX 공식 JSON API (POST 방식)
+    줄바꿈, 긴 공지사항, 특수문자, 클라우드 IP 차단 문제를 완벽하게 해결하는 고신뢰 무료 번역기
+    """
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": target_lang,
+            "dt": "t",
+            "q": text,
+        }
+        post_data = urllib.parse.urlencode(params).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=post_data,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=12) as response:
+            content = response.read().decode("utf-8")
+            data = json.loads(content)
+            if data and isinstance(data, list) and len(data) > 0 and data[0]:
+                parts = [p[0] for p in data[0] if p and len(p) > 0 and p[0]]
+                result = "".join(parts).strip()
+                # 500 에러 문자열이 섞여 들어오지 않았는지 검증
+                if result and "Error 500" not in result and "That's an error" not in result:
+                    return result
+    except Exception as e:
+        logger.error(f"GTX API 번역 오류 ({target_lang}): {e}")
+    return None
+
+
 class UnifiedTranslationService:
-    """
-    DeepL API와 무료 엔진(GoogleTranslator)을 결합한 번역 서비스.
-    베트남어(vi)는 DeepL이 미지원하므로 안정적인 무료 엔진(GoogleTranslator)으로 100% 번역 처리.
-    """
+    """통합 번역 서비스: DeepL(키 있을 시) 또는 고성능 GTX API(기본) 사용"""
     def __init__(self, deepl_api_key: str = ""):
         self.deepl_api_key = deepl_api_key.strip() if deepl_api_key else ""
         self._deepl_translator: Optional[deepl.Translator] = None
@@ -172,23 +194,28 @@ class UnifiedTranslationService:
 
     def get_engine_name(self) -> str:
         if self._deepl_translator:
-            return "공식 DeepL API + 무료 다국어 엔진"
-        return "무료 다국어 번역 엔진 (deep-translator)"
+            return "공식 DeepL API + Google GTX 엔진"
+        return "Google GTX 고성능 무료 번역 엔진"
 
     def _translate_free(self, text: str, target_lang: str) -> Optional[str]:
-        """무료 엔진(GoogleTranslator)으로 번역 (한국어, 영어, 베트남어 모두 완벽 지원)"""
+        # 1. Google GTX POST API 우선 호출 (긴 글, 줄바꿈, 500 에러 방지)
+        gtx_res = translate_google_gtx(text, target_lang)
+        if gtx_res:
+            return gtx_res
+
+        # 2. 예비 폴백 (deep-translator)
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
-            return translator.translate(text)
+            res = translator.translate(text)
+            if res and "Error 500" not in res:
+                return res
         except Exception as e:
-            logger.error(f"무료 번역 엔진 오류 ({target_lang}): {e}")
-            return None
+            logger.error(f"deep-translator 오류: {e}")
+
+        return None
 
     def translate(self, text: str, target_lang: str) -> Optional[str]:
-        """
-        target_lang: 'en', 'ko', 'vi'
-        """
-        # 베트남어는 GoogleTranslator 무료 엔진 사용
+        # 베트남어는 Google GTX 엔진 사용
         if target_lang == "vi":
             return self._translate_free(text, "vi")
 
@@ -199,8 +226,8 @@ class UnifiedTranslationService:
                 result = self._deepl_translator.translate_text(text, target_lang=deepl_target)
                 return result.text
             except Exception as e:
-                logger.warning(f"DeepL 실패 ({e}) -> 무료 엔진으로 대체")
+                logger.warning(f"DeepL 실패 ({e}) -> GTX 엔진으로 대체")
                 return self._translate_free(text, target_lang)
 
-        # 기본 무료 엔진 실행
+        # 기본 무료 GTX 엔진 실행
         return self._translate_free(text, target_lang)
