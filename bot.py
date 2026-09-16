@@ -105,12 +105,17 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if is_admin(user.id):
         return True
 
-    # 2. 텔레그램 자체 그룹 방장(creator) 또는 관리자(administrator)인 경우
+    # 2. 텔레그램 익명 관리자 모드(GroupAnonymousBot / Channel)인 경우: 관리자가 보낸 것이므로 승인
+    if user.id in [1087968824, 136817688] or getattr(user, "username", "") == "GroupAnonymousBot":
+        return True
+
+    # 3. 텔레그램 자체 그룹 방장(creator) 또는 관리자(administrator)인 경우
     try:
         member = await context.bot.get_chat_member(chat_id=chat.id, user_id=user.id)
         return member.status in ["creator", "administrator"]
-    except Exception:
-        return False
+    except Exception as e:
+        logger.warning(f"Could not verify chat member: {e}")
+        return is_admin(user.id)
 
 
 async def notify_admins_new_group(chat, inviter, context: ContextTypes.DEFAULT_TYPE):
@@ -473,15 +478,24 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(message, "안내: 토픽 설정은 대화방 관리자만 변경할 수 있습니다.")
         return
 
-    is_forum = bool(getattr(chat, "is_forum", False))
-    if not is_forum:
-        await safe_reply(message, "안내: 이 방은 주제(포럼) 기능이 없는 일반 그룹방입니다. 전체 번역 제어는 `/translate on/off`를 사용하세요.")
-        return
+    # 스레드(토픽) ID 추출 (토픽 메시지인 경우 message_thread_id, 없으면 1)
+    thread_id = message.message_thread_id
+    if thread_id is None and getattr(message, "is_topic_message", False):
+        thread_id = 1
 
     args = context.args
-    thread_id = message.message_thread_id
+    raw_action = args[0].lower().strip() if args else ""
 
-    if not args or args[0].lower() not in ["on", "off", "all"]:
+    if raw_action in ["on", "켜기", "시작", "활성화"]:
+        action = "on"
+    elif raw_action in ["off", "끄기", "중지", "비활성화"]:
+        action = "off"
+    elif raw_action in ["all", "전체", "모두"]:
+        action = "all"
+    else:
+        action = "help"
+
+    if action == "help":
         active = db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True)
         conf = db.get_group_config(chat.id)
         topic_mode = conf.get("topic_mode", "selective")
@@ -492,9 +506,9 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 **현재 주제 번역 상태: {status_str}**\n"
             f"• 그룹 토픽 설정: `{mode_desc}`\n\n"
             "**주제별 제어 명령어**:\n"
-            "• `/topic on` : **현재 이 주제에서만** 번역 켜기 (다른 방 조용)\n"
-            "• `/topic off` : 현재 이 주제에서 번역 끄기\n"
-            "• `/topic all` : 이 그룹의 모든 주제에서 번역 켜기"
+            "• `/topic on` 또는 `/토픽 켜기` : **현재 이 주제에서만** 번역 켜기 (다른 방 조용)\n"
+            "• `/topic off` 또는 `/토픽 끄기` : 현재 이 주제에서 번역 끄기\n"
+            "• `/topic all` 또는 `/토픽 전체` : 이 그룹의 모든 주제에서 번역 켜기"
         )
         await safe_reply(message, text, parse_mode="Markdown")
         return
@@ -618,13 +632,17 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    if not args or args[0].lower() not in ["on", "off"]:
+    raw_action = args[0].lower().strip() if args else ""
+    if raw_action in ["on", "켜기", "시작", "활성화"]:
+        enabled = True
+    elif raw_action in ["off", "끄기", "중지", "비활성화"]:
+        enabled = False
+    else:
         conf = db.get_group_config(chat.id)
-        status_str = "ON" if conf.get("is_enabled", True) else "OFF"
-        await safe_reply(message, f"현재 번역 상태: **{status_str}** (`/translate on/off`)")
+        status_str = "ON (켜짐)" if conf.get("is_enabled", True) else "OFF (꺼짐)"
+        await safe_reply(message, f"📊 현재 번역 기능 상태: **{status_str}** (`/translate on/off` 또는 `/번역 켜기/끄기`)")
         return
 
-    enabled = (args[0].lower() == "on")
     if enabled and chat.type != "private":
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, is_enabled=enabled)
@@ -754,12 +772,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Group {chat.id} is blocked/unapproved. Skipping.")
             return
 
-        is_forum = bool(getattr(chat, "is_forum", False))
-        if not db.is_topic_translation_enabled(chat.id, message.message_thread_id, is_forum):
-            logger.info(f"Topic {message.message_thread_id} in {chat.id} is disabled. Skipping.")
-            return
-
         conf = db.get_group_config(chat.id)
+        thread_id = message.message_thread_id
+        is_forum_chat = (
+            bool(getattr(message, "is_topic_message", False))
+            or (thread_id is not None and thread_id != 0)
+            or bool(conf.get("is_forum", False))
+            or bool(getattr(chat, "is_forum", False))
+        )
+
+        if is_forum_chat and thread_id is not None:
+            if not db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True):
+                logger.info(f"Topic {thread_id} in {chat.id} is disabled. Skipping.")
+                return
+
         mode = conf.get("lang_mode", "all")
     else:
         if not is_approved_member(user.id):
@@ -845,9 +871,9 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # 핸들러 등록
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler(["start", "시작"], cmd_start))
+    app.add_handler(CommandHandler(["help", "도움말"], cmd_help))
+    app.add_handler(CommandHandler(["status", "상태"], cmd_status))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("groups", cmd_groups))
     app.add_handler(CommandHandler("approve_group", cmd_approve_group))
@@ -855,9 +881,9 @@ def main():
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))
     app.add_handler(CommandHandler("revoke_admin", cmd_revoke_admin))
     app.add_handler(CommandHandler("allow_group", cmd_allow_group))
-    app.add_handler(CommandHandler("topic", cmd_topic))
-    app.add_handler(CommandHandler("lang", cmd_lang))
-    app.add_handler(CommandHandler("translate", cmd_translate))
+    app.add_handler(CommandHandler(["topic", "토픽"], cmd_topic))
+    app.add_handler(CommandHandler(["lang", "언어"], cmd_lang))
+    app.add_handler(CommandHandler(["translate", "번역"], cmd_translate))
     app.add_handler(ChatMemberHandler(track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
