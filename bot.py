@@ -946,7 +946,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     if "conflict" in err_str or err_type == "Conflict":
         logger.warning("Notice: Instance transition detected (Conflict). Active container is taking over.")
         return
-    logger.error(f"Handled exception: {err_type}")
+    logger.error(f"Handled exception: {err_type} - {err}", exc_info=err)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):

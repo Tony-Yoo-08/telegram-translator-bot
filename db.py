@@ -259,9 +259,10 @@ def is_topic_translation_enabled(chat_id: int, thread_id: Optional[int], is_foru
     if not conf.get("is_enabled", True):
         return False
 
-    if not is_forum or thread_id is None:
+    if not is_forum:
         return True
 
+    effective_thread = thread_id if thread_id is not None else 1
     topic_mode = conf.get("topic_mode", "selective")
 
     with get_connection() as conn:
@@ -269,7 +270,7 @@ def is_topic_translation_enabled(chat_id: int, thread_id: Optional[int], is_foru
         cursor.execute("""
             SELECT is_enabled FROM group_topics 
             WHERE chat_id = ? AND thread_id = ?
-        """, (chat_id, thread_id))
+        """, (chat_id, effective_thread))
         row = cursor.fetchone()
 
         if topic_mode == "all":
@@ -285,7 +286,7 @@ def enable_topic(chat_id: int, thread_id: int):
             INSERT INTO group_topics (chat_id, thread_id, is_enabled)
             VALUES (?, ?, 1)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET is_enabled = 1
-        """)
+        """, (chat_id, thread_id))
         cursor.execute("UPDATE groups SET topic_mode = 'selective' WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
@@ -297,7 +298,8 @@ def disable_topic(chat_id: int, thread_id: int):
             INSERT INTO group_topics (chat_id, thread_id, is_enabled)
             VALUES (?, ?, 0)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET is_enabled = 0
-        """)
+        """, (chat_id, thread_id))
+        cursor.execute("UPDATE groups SET topic_mode = 'selective' WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
 
