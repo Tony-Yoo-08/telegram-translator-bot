@@ -325,10 +325,14 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for idx, g in enumerate(groups, 1):
         status_icon = "🟢 승인됨" if g["is_allowed"] else "🟡 대기중(미승인)"
         forum_badge = " (주제별 포럼)" if g["is_forum"] else ""
+        topic_mode_str = ""
+        if g.get("is_forum"):
+            t_mode = g.get("topic_mode", "selective")
+            topic_mode_str = f" | 토픽모드: {'선택주제만' if t_mode == 'selective' else '전체주제'}"
         lines.append(
             f"**{idx}. {g['title'] or '이름 없음'}**{forum_badge}\n"
             f"• ID: `{g['chat_id']}` | 상태: {status_icon}\n"
-            f"• 모드: `{g['lang_mode']}` | 번역 기능: {'ON' if g['is_enabled'] else 'OFF'}\n"
+            f"• 언어모드: `{g['lang_mode']}` | 번역스위치: {'ON' if g['is_enabled'] else 'OFF'}{topic_mode_str}\n"
         )
 
     lines.append(
@@ -461,7 +465,17 @@ async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     guide = "✅ **이 대화방의 번역 기능이 정상 활성화되었습니다.**"
     if is_forum:
-        guide += "\n\n💡 기본적으로 모든 주제에서 번역되며, 특정 주제만 번역하길 원하시면 해당 토픽에서 `/topic on`을 입력해 주세요."
+        thread_id = message.message_thread_id
+        if thread_id is None and getattr(message, "is_topic_message", False):
+            thread_id = 1
+        target_thread = thread_id if thread_id is not None else 1
+        db.enable_topic(chat.id, target_thread)
+
+        guide += (
+            "\n\n🔔 **현재 주제(토픽)의 실시간 자동 번역이 즉시 켜졌습니다!**\n\n"
+            "• 다른 주제에서도 번역을 켜시려면 해당 토픽에서 `토픽 on` (또는 `/topic on`)을 입력해 주세요.\n"
+            "• 모든 주제에서 동시에 번역을 켜시려면 `토픽 all` (또는 `/topic all`)을 입력해 주세요."
+        )
 
     await safe_reply(message, guide, parse_mode="Markdown")
 
@@ -688,12 +702,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic_info = ""
     if is_forum:
         thread_id = message.message_thread_id
-        active = db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True)
+        if thread_id is None and getattr(message, "is_topic_message", False):
+            thread_id = 1
+        target_thread = thread_id if thread_id is not None else 1
+        active = db.is_topic_translation_enabled(chat.id, target_thread, is_forum=True)
         topic_mode = conf.get("topic_mode", "selective")
         topic_info = (
             f"• 대화방 구조: 포럼 (주제별 대화방)\n"
-            f"• 그룹 토픽 모드: {'선택된 주제만 번역' if topic_mode == 'selective' else '모든 주제 번역'}\n"
-            f"• 현재 주제(ID: {thread_id or '메인'}): {'🟢 켜짐(ON)' if active else '⚪ 꺼짐(대기)'}\n"
+            f"• 그룹 토픽 모드: {'선택된 주제만 번역 (개별 모드)' if topic_mode == 'selective' else '모든 주제 번역 (전체 모드)'}\n"
+            f"• 현재 주제(ID: {target_thread}): {'🟢 켜짐(ON)' if active else '⚪ 꺼짐(대기)'}\n"
         )
 
     status_text = (
@@ -765,7 +782,36 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
     cmd_name = first_token[1:] if has_slash else first_token
     cmd_args = parts[1:]
 
-    # 슬래시 없는 일반 대화와의 오작동 방지용 검증
+    # 1. 띄어쓰기 없이 붙여 쓴 형태 (/topicon, 토픽on, /topicoff, 토픽off, /topicall, 토픽all 등) 처리
+    joined_topic_map = {
+        "topicon": "on", "topic_on": "on", "토픽on": "on", "토픽켜기": "on", "topic켜기": "on",
+        "topicoff": "off", "topic_off": "off", "토픽off": "off", "토픽끄기": "off", "topic끄기": "off",
+        "topicall": "all", "topic_all": "all", "토픽all": "all", "토픽전체": "all", "topic전체": "all", "토픽모두": "all",
+    }
+    joined_translate_map = {
+        "translateon": "on", "translate_on": "on", "번역on": "on", "번역켜기": "on",
+        "translateoff": "off", "translate_off": "off", "번역off": "off", "번역끄기": "off",
+    }
+    joined_lang_map = {
+        "langall": "all", "lang_all": "all", "언어all": "all", "언어전체": "all", "언어3개국어": "all",
+        "langkovi": "ko-vi", "lang_kovi": "ko-vi", "langko-vi": "ko-vi", "langvi": "ko-vi", "언어vi": "ko-vi", "언어한베": "ko-vi", "언어베트남": "ko-vi",
+        "langkoen": "ko-en", "lang_koen": "ko-en", "langko-en": "ko-en", "langen": "ko-en", "언어en": "ko-en", "언어한영": "ko-en", "언어영어": "ko-en",
+    }
+
+    if cmd_name in joined_topic_map:
+        context.args = [joined_topic_map[cmd_name]]
+        await cmd_topic(update, context)
+        return True
+    elif cmd_name in joined_translate_map:
+        context.args = [joined_translate_map[cmd_name]]
+        await cmd_translate(update, context)
+        return True
+    elif cmd_name in joined_lang_map:
+        context.args = [joined_lang_map[cmd_name]]
+        await cmd_lang(update, context)
+        return True
+
+    # 2. 일반 분리형 명령어 검증
     # 슬래시가 있거나(/토픽, /번역 등), 유효한 명령어 키워드와 인자 조합일 때만 실행
     if cmd_name in ["topic", "토픽"]:
         if has_slash or not cmd_args or cmd_args[0].lower() in ["on", "off", "all", "켜기", "끄기", "전체", "모두", "시작", "중지"]:
