@@ -415,12 +415,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """S8: 전역 예외 처리기 - 메시지 삭제 등 무해한 오류로 인한 로그 오염 및 중단 방지"""
+    """S8: 전역 예외 처리기 - 배포 전환 시 충돌(Conflict)이나 삭제된 메시지 등 무해한 상태를 안전하게 처리"""
     err = context.error
-    if err and "Message to be replied not found" in str(err):
+    if not err:
+        return
+    err_str = str(err).lower()
+    err_type = type(err).__name__
+    if "message to be replied not found" in err_str:
         logger.warning("Notice: Target message was deleted before reply was sent.")
         return
-    logger.error(f"Handled exception: {type(err).__name__}")
+    if "conflict" in err_str or err_type == "Conflict":
+        logger.warning("Notice: Instance transition detected (Conflict). Active container is taking over.")
+        return
+    logger.error(f"Handled exception: {err_type}")
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
