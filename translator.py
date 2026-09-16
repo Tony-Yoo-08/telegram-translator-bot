@@ -13,73 +13,73 @@ logger = logging.getLogger(__name__)
 URL_PATTERN = re.compile(r'https?://\S+|www\.\S+')
 MENTION_PATTERN = re.compile(r'@\w+')
 
-# 특수기호, 문장부호, 대표적인 리액션 이모지 제거용 정규식
+# 특수기호, 문장부호, 대표적인 이모지 제거용 정규식
 PUNCT_AND_EMOJI = re.compile(r'[\s!~.?,\^;:\-_/\\()\[\]{}@#$%&*+=\'\"|🙏❤️✨🙌👏🙇👍😊😄😃😀]+')
 
-# 베트남어 고유 특수문자 및 성조 문자 정규식
-VIETNAMESE_PATTERN = re.compile(
+# 특정 언어 고유 문자 정규식 (S12 준수: 중립적 명칭)
+LANG_SPECIFIC_CHAR_PATTERN = re.compile(
     r'[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ'
     r'ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]'
 )
 
-# 1. 단답형 리액션/감탄사로만 이루어진 경우 번역에서 제외할 단어 목록
-IGNORED_EXACT_WORDS = {
-    # 종교적/신앙적 단답 리액션
+# 단답형 감탄사 및 빈번한 단문 리액션 필터링 목록 (S12 준수: 중립적 변수명 및 주석)
+FILTERED_SHORT_RESPONSES = {
+    # 그룹 1: 단문 호응어
     "아멘", "amen", "아멘입니다", "아멘요",
     "샬롬", "shalom", "할렐루야", "hallelujah",
     "기도합니다", "축복합니다", "은혜롭습니다",
     
-    # 한국어 단순 감탄사/대답
+    # 그룹 2: 일상 단답/확인
     "네", "넵", "넹", "넴", "예", "응", "어", "아니", "아뇨", "아닙니다",
     "오키", "오케이", "ㅇㅋ", "알겠습니다", "확인했습니다",
     "감사", "감사합니다", "고마워", "고마워요", "수고", "수고하셨습니다", "수고하세요",
     "축하", "축하합니다", "축하해요", "축하드려요",
     "하이", "바이", "굿", "좋아요", "대박",
     
-    # 영어 단순 리액션
+    # 그룹 3: 영문 단답
     "ok", "okay", "yes", "yeah", "yep", "no", "nope",
     "thx", "thanks", "thankyou", "thank",
     "ty", "k", "gg", "lol", "nvm", "np", "pls", "plz", "sry", "sorry",
     "good", "great", "nice", "cool", "wow", "omg", "congrats",
 
-    # 베트남어 단순 리액션
-    "dạ", "vâng", "cảm ơn", "cam on", "ok", "oke"
+    # 그룹 4: 기타 언어 단답
+    "dạ", "vâng", "cảm ơn", "cam on", "oke"
 }
 
-# 2. "아멘 아멘", "Amen Amen 🙏" 처럼 특정 단어가 반복되는 패턴 정규식
-REPEATING_AMEN_PATTERN = re.compile(
+# 단순 반복 패턴 정규식
+REPEATING_WORD_PATTERN = re.compile(
     r'^((아멘|amen|샬롬|shalom|할렐루야|hallelujah)[\s!~.?🙏❤️✨🙌👏🙇]*)+$',
     re.IGNORECASE
 )
 
 
 def preprocess_text(text: str) -> str:
-    """URL, 멘션 등을 임시 제거하여 실제 번역할 텍스트 내용만 추출"""
+    """URL, 멘션 등을 임시 제거하여 실제 내용만 추출"""
     cleaned = URL_PATTERN.sub('', text)
     cleaned = MENTION_PATTERN.sub('', cleaned)
     return cleaned.strip()
 
 
 def is_trivial_reaction(text: str) -> bool:
-    """단순 감탄사, 아멘, 단답형 리액션 등 번역할 가치가 없는 사소한 메시지인지 판별"""
+    """단순 리액션 여부 판별 (실질적인 대화/공지는 False 반환)"""
     if re.fullmatch(r'^[ㄱ-ㅎㅏ-ㅣ\s]+$', text):
         return True
 
-    if REPEATING_AMEN_PATTERN.fullmatch(text):
+    if REPEATING_WORD_PATTERN.fullmatch(text):
         return True
 
     stripped = PUNCT_AND_EMOJI.sub('', text).lower()
     if not stripped:
         return True
 
-    if stripped in IGNORED_EXACT_WORDS:
+    if stripped in FILTERED_SHORT_RESPONSES:
         return True
 
     return False
 
 
 def detect_source_language(text: str) -> Optional[str]:
-    """텍스트의 언어를 감지하여 "KO", "VI", "EN" 중 하나를 반환"""
+    """텍스트의 언어를 감지하여 'KO', 'VI', 'EN' 중 하나를 반환"""
     if not text or not text.strip():
         return None
 
@@ -91,10 +91,10 @@ def detect_source_language(text: str) -> Optional[str]:
         return None
 
     # 단순 기호/숫자/이모지만 있는 경우 제외
-    if not re.search(r'[가-힣a-zA-Z]', cleaned) and not VIETNAMESE_PATTERN.search(cleaned):
+    if not re.search(r'[가-힣a-zA-Z]', cleaned) and not LANG_SPECIFIC_CHAR_PATTERN.search(cleaned):
         return None
 
-    # 사소한 리액션 필터링
+    # 단순 리액션 필터링
     if is_trivial_reaction(cleaned):
         return None
 
@@ -102,11 +102,11 @@ def detect_source_language(text: str) -> Optional[str]:
     if re.search(r'[가-힣]', cleaned):
         return "KO"
 
-    # 2. 베트남어 특수 문자 감지
-    if VIETNAMESE_PATTERN.search(cleaned):
+    # 2. 베트남어 문자 감지
+    if LANG_SPECIFIC_CHAR_PATTERN.search(cleaned):
         return "VI"
 
-    # 3. 영문 / 라틴 문자 감지
+    # 3. 영문 문자 감지
     if re.search(r'[a-zA-Z]', cleaned):
         return "EN"
 
@@ -114,7 +114,7 @@ def detect_source_language(text: str) -> Optional[str]:
 
 
 def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[str, str]]:
-    """모드별 번역 목적지 언어 반환"""
+    """모드별 번역 대상 언어 및 심볼 반환"""
     mode = mode.lower()
 
     if mode == "ko-en":
@@ -131,7 +131,7 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
             return [("ko", "🇰🇷")]
         return []
 
-    # mode == "all" (한-영-베 동시 모드)
+    # mode == 'all'
     if source_lang == "KO":
         return [("en", "🇺🇸"), ("vi", "🇻🇳")]
     elif source_lang == "VI":
@@ -143,10 +143,10 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
 
 
 def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
-    """
-    Google GTX 공식 JSON API (POST 방식)
-    줄바꿈, 긴 공지사항, 특수문자, 클라우드 IP 차단 문제를 완벽하게 해결하는 고신뢰 무료 번역기
-    """
+    """Google GTX POST API 번역 (S6: 최대 입력 길이 4000자 제한 적용)"""
+    if len(text) > 4000:
+        text = text[:4000]
+
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
@@ -171,16 +171,16 @@ def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
             if data and isinstance(data, list) and len(data) > 0 and data[0]:
                 parts = [p[0] for p in data[0] if p and len(p) > 0 and p[0]]
                 result = "".join(parts).strip()
-                # 500 에러 문자열이 섞여 들어오지 않았는지 검증
                 if result and "Error 500" not in result and "That's an error" not in result:
                     return result
     except Exception as e:
-        logger.error(f"GTX API 번역 오류 ({target_lang}): {e}")
+        # S8: 에러 로그에 원문 텍스트 미포함 (언어 코드만 기록)
+        logger.error(f"GTX translation error for target {target_lang}: {type(e).__name__}")
     return None
 
 
 class UnifiedTranslationService:
-    """통합 번역 서비스: DeepL(키 있을 시) 또는 고성능 GTX API(기본) 사용"""
+    """통합 번역 서비스"""
     def __init__(self, deepl_api_key: str = ""):
         self.deepl_api_key = deepl_api_key.strip() if deepl_api_key else ""
         self._deepl_translator: Optional[deepl.Translator] = None
@@ -188,46 +188,41 @@ class UnifiedTranslationService:
         if self.deepl_api_key:
             try:
                 self._deepl_translator = deepl.Translator(self.deepl_api_key)
-                logger.info("공식 DeepL API가 초기화되었습니다.")
+                logger.info("External translation API initialized.")
             except Exception as e:
-                logger.warning(f"DeepL 초기화 실패: {e}")
+                logger.warning(f"External API init failed: {type(e).__name__}")
 
     def get_engine_name(self) -> str:
         if self._deepl_translator:
-            return "공식 DeepL API + Google GTX 엔진"
-        return "Google GTX 고성능 무료 번역 엔진"
+            return "Primary API + GTX Engine"
+        return "GTX Translation Engine"
 
     def _translate_free(self, text: str, target_lang: str) -> Optional[str]:
-        # 1. Google GTX POST API 우선 호출 (긴 글, 줄바꿈, 500 에러 방지)
         gtx_res = translate_google_gtx(text, target_lang)
         if gtx_res:
             return gtx_res
 
-        # 2. 예비 폴백 (deep-translator)
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
             res = translator.translate(text)
             if res and "Error 500" not in res:
                 return res
         except Exception as e:
-            logger.error(f"deep-translator 오류: {e}")
+            logger.error(f"Fallback translator error: {type(e).__name__}")
 
         return None
 
     def translate(self, text: str, target_lang: str) -> Optional[str]:
-        # 베트남어는 Google GTX 엔진 사용
         if target_lang == "vi":
             return self._translate_free(text, "vi")
 
-        # 영어/한국어이고 DeepL 키가 있는 경우 DeepL 우선 시도
         if self._deepl_translator and target_lang in ["en", "ko"]:
             deepl_target = "EN-US" if target_lang == "en" else "KO"
             try:
                 result = self._deepl_translator.translate_text(text, target_lang=deepl_target)
                 return result.text
             except Exception as e:
-                logger.warning(f"DeepL 실패 ({e}) -> GTX 엔진으로 대체")
+                logger.warning(f"Primary API error ({type(e).__name__}) -> Fallback to GTX")
                 return self._translate_free(text, target_lang)
 
-        # 기본 무료 GTX 엔진 실행
         return self._translate_free(text, target_lang)
