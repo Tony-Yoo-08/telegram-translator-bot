@@ -506,14 +506,12 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 **현재 주제 번역 상태: {status_str}**\n"
             f"• 그룹 토픽 설정: `{mode_desc}`\n\n"
             "**주제별 제어 명령어**:\n"
-            "• `/topic on` 또는 `/토픽 켜기` : **현재 이 주제에서만** 번역 켜기 (다른 방 조용)\n"
-            "• `/topic off` 또는 `/토픽 끄기` : 현재 이 주제에서 번역 끄기\n"
-            "• `/topic all` 또는 `/토픽 전체` : 이 그룹의 모든 주제에서 번역 켜기"
+            "• `/topic on` (또는 `토픽 on` / `토픽 켜기`) : **현재 이 주제에서만** 번역 켜기 (다른 방 조용)\n"
+            "• `/topic off` (또는 `토픽 off` / `토픽 끄기`) : 현재 이 주제에서 번역 끄기\n"
+            "• `/topic all` (또는 `토픽 all` / `토픽 전체`) : 이 그룹의 모든 주제에서 번역 켜기"
         )
         await safe_reply(message, text, parse_mode="Markdown")
         return
-
-    action = args[0].lower()
 
     if action == "all":
         db.set_group_allowed(chat.id, True, chat.title or "", is_forum=True)
@@ -562,7 +560,14 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    if not args or args[0].lower() not in ["all", "ko-vi", "ko-en"]:
+    raw_mode = args[0].lower().strip() if args else ""
+    if raw_mode in ["all", "전체", "모두", "3개국어", "3"]:
+        new_mode = "all"
+    elif raw_mode in ["ko-vi", "vi", "한베", "베트남", "베트남어"]:
+        new_mode = "ko-vi"
+    elif raw_mode in ["ko-en", "en", "한영", "영어"]:
+        new_mode = "ko-en"
+    else:
         conf = db.get_group_config(chat.id)
         current = conf.get("lang_mode", "all")
         current_names = {
@@ -574,14 +579,13 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message,
             f"📊 **현재 언어 모드**: **`{current_names.get(current, current)}`**\n\n"
             "**언어 모드 변경 명령어**:\n"
-            "• `/lang all` : 3개국어 통합 모드 (한국어 ➡️ 영+베 동시 번역)\n"
-            "• `/lang ko-vi` : 한-베 전용 모드 (한국어 ↔ 베트남어)\n"
-            "• `/lang ko-en` : 한-영 전용 모드 (한국어 ↔ 영어)",
+            "• `/lang all` (또는 `언어 all` / `언어 전체`): 3개국어 통합 모드 (한국어 ➡️ 영+베 동시 번역)\n"
+            "• `/lang ko-vi` (또는 `언어 한베` / `언어 vi`): 한-베 전용 모드 (한국어 ↔ 베트남어)\n"
+            "• `/lang ko-en` (또는 `언어 한영` / `언어 en`): 한-영 전용 모드 (한국어 ↔ 영어)",
             parse_mode="Markdown"
         )
         return
 
-    new_mode = args[0].lower()
     if chat.type != "private":
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, lang_mode=new_mode)
@@ -640,7 +644,7 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         conf = db.get_group_config(chat.id)
         status_str = "ON (켜짐)" if conf.get("is_enabled", True) else "OFF (꺼짐)"
-        await safe_reply(message, f"📊 현재 번역 기능 상태: **{status_str}** (`/translate on/off` 또는 `/번역 켜기/끄기`)")
+        await safe_reply(message, f"📊 현재 번역 기능 상태: **{status_str}** (`/translate on/off` 또는 `번역 on/off` / `번역 켜기/끄기`)")
         return
 
     if enabled and chat.type != "private":
@@ -734,15 +738,71 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **사용 안내**\n\n"
         "• 한국어 ↔ 영어 ↔ 베트남어 실시간 자동 감지 번역\n"
         "• 단답형 리액션/감탄사는 자동 필터링\n\n"
-        "📌 **주요 명령어**:\n"
-        "• `/status` : 현재 설정 및 권한 상태 확인\n"
-        "• `/topic on | off | all` : 포럼 주제별 번역 제어 (방장/관리자)\n"
-        "• `/lang all | ko-vi | ko-en` : 언어 모드 설정 (방장/관리자)\n"
-        "• `/translate on | off` : 번역 켜기/끄기 (방장/관리자)\n"
+        "📌 **주요 명령어 (영문 / 한글 모두 지원)**:\n"
+        "• `/status` (또는 `상태`) : 현재 설정 및 권한 상태 확인\n"
+        "• `/topic on | off | all` (또는 `토픽 on | off | all` / `토픽 켜기 | 끄기`): 포럼 주제별 번역 제어 (방장/관리자)\n"
+        "• `/lang all | ko-vi | ko-en` (또는 `언어 전체 | 한베 | 한영`): 언어 모드 설정 (방장/관리자)\n"
+        "• `/translate on | off` (또는 `번역 on | off`): 방 전체 번역 켜기/끄기 (방장/관리자)\n"
         "• `/myid` : 본인 식별 번호 확인\n"
         f"{admin_extra}"
     )
     await safe_reply(message, text, parse_mode="Markdown")
+
+
+async def handle_custom_or_korean_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """한글 명령어 및 슬래시 없는 단축 명령어 처리 (/토픽 on, 토픽 on, /번역 켜기 등)"""
+    message = update.effective_message
+    if not message or not message.text:
+        return False
+
+    raw = message.text.strip()
+    parts = raw.split()
+    if not parts:
+        return False
+
+    first_token = parts[0].lower()
+    has_slash = first_token.startswith("/")
+    cmd_name = first_token[1:] if has_slash else first_token
+    cmd_args = parts[1:]
+
+    # 슬래시 없는 일반 대화와의 오작동 방지용 검증
+    # 슬래시가 있거나(/토픽, /번역 등), 유효한 명령어 키워드와 인자 조합일 때만 실행
+    if cmd_name in ["topic", "토픽"]:
+        if has_slash or not cmd_args or cmd_args[0].lower() in ["on", "off", "all", "켜기", "끄기", "전체", "모두", "시작", "중지"]:
+            context.args = cmd_args
+            await cmd_topic(update, context)
+            return True
+    elif cmd_name in ["translate", "번역"]:
+        if has_slash or not cmd_args or cmd_args[0].lower() in ["on", "off", "켜기", "끄기", "시작", "중지", "활성화", "비활성화"]:
+            context.args = cmd_args
+            await cmd_translate(update, context)
+            return True
+    elif cmd_name in ["lang", "언어"]:
+        if has_slash or not cmd_args or cmd_args[0].lower() in ["all", "ko-vi", "ko-en", "전체", "모두", "3개국어", "한베", "베트남", "베트남어", "한영", "영어", "vi", "en"]:
+            context.args = cmd_args
+            await cmd_lang(update, context)
+            return True
+    elif cmd_name in ["status", "상태"]:
+        if has_slash or len(parts) == 1:
+            context.args = cmd_args
+            await cmd_status(update, context)
+            return True
+    elif cmd_name in ["help", "도움말"]:
+        if has_slash or len(parts) == 1:
+            context.args = cmd_args
+            await cmd_help(update, context)
+            return True
+    elif cmd_name in ["start", "시작"]:
+        if has_slash or len(parts) == 1:
+            context.args = cmd_args
+            await cmd_start(update, context)
+            return True
+
+    # 그 외 슬래시(/)로 시작하는 미인식 명령어는 일반 번역을 하지 않고 무시
+    if has_slash:
+        return True
+
+    return False
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -752,7 +812,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not message or not message.text or not user:
         return
-    if user.is_bot or message.text.startswith('/'):
+    if user.is_bot:
+        return
+
+    # 한글 및 단축 명령어 가로채기
+    if await handle_custom_or_korean_command(update, context):
         return
 
     # S10: 레이트 리밋 검사
@@ -781,9 +845,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or bool(getattr(chat, "is_forum", False))
         )
 
-        if is_forum_chat and thread_id is not None:
-            if not db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True):
-                logger.info(f"Topic {thread_id} in {chat.id} is disabled. Skipping.")
+        if is_forum_chat:
+            target_thread = thread_id if thread_id is not None else 1
+            if not db.is_topic_translation_enabled(chat.id, target_thread, is_forum=True):
+                logger.info(f"Topic {target_thread} in {chat.id} is disabled. Skipping.")
                 return
 
         mode = conf.get("lang_mode", "all")
@@ -871,9 +936,9 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # 핸들러 등록
-    app.add_handler(CommandHandler(["start", "시작"], cmd_start))
-    app.add_handler(CommandHandler(["help", "도움말"], cmd_help))
-    app.add_handler(CommandHandler(["status", "상태"], cmd_status))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("groups", cmd_groups))
     app.add_handler(CommandHandler("approve_group", cmd_approve_group))
@@ -881,9 +946,9 @@ def main():
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))
     app.add_handler(CommandHandler("revoke_admin", cmd_revoke_admin))
     app.add_handler(CommandHandler("allow_group", cmd_allow_group))
-    app.add_handler(CommandHandler(["topic", "토픽"], cmd_topic))
-    app.add_handler(CommandHandler(["lang", "언어"], cmd_lang))
-    app.add_handler(CommandHandler(["translate", "번역"], cmd_translate))
+    app.add_handler(CommandHandler("topic", cmd_topic))
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(ChatMemberHandler(track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
