@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "auth_store.db"
 EMERGENCY_ADMIN_ID = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
+AUTO_APPROVE_GROUPS = os.getenv("AUTO_APPROVE_GROUPS", "true").lower() in ["true", "1", "yes"]
 
 
 def get_connection() -> sqlite3.Connection:
@@ -34,7 +35,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS groups (
                 chat_id INTEGER PRIMARY KEY,
                 title TEXT,
-                is_allowed INTEGER DEFAULT 0,
+                is_allowed INTEGER DEFAULT 1,
                 lang_mode TEXT DEFAULT 'all',
                 is_enabled INTEGER DEFAULT 1,
                 is_forum INTEGER DEFAULT 0,
@@ -58,6 +59,22 @@ def init_db():
                 value TEXT NOT NULL
             )
         """)
+        # S5: .env 비상 관리자 자동 부트스트랩 (서버 재기동 시 데이터 보존)
+        if EMERGENCY_ADMIN_ID:
+            try:
+                e_id = int(EMERGENCY_ADMIN_ID)
+                cursor.execute("""
+                    INSERT INTO users (user_id, role, username)
+                    VALUES (?, 'admin', 'MasterAdmin')
+                    ON CONFLICT(user_id) DO UPDATE SET role = 'admin'
+                """, (e_id,))
+                cursor.execute("""
+                    INSERT INTO system_flags (key, value)
+                    VALUES ('admin_initialized', 'true')
+                    ON CONFLICT(key) DO UPDATE SET value = 'true'
+                """)
+            except ValueError:
+                pass
         conn.commit()
 
 
@@ -148,19 +165,26 @@ def is_group_allowed(chat_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT is_allowed FROM groups WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
-        return bool(row and row["is_allowed"] == 1)
+        if row is not None:
+            return bool(row["is_allowed"] == 1)
+        return AUTO_APPROVE_GROUPS
 
 
-def register_group_pending(chat_id: int, title: str = "", is_forum: bool = False):
-    """미승인 대기 상태로 그룹 등록 (알림 전송용)"""
+def register_group(chat_id: int, title: str = "", is_forum: bool = False):
+    """신규 그룹 등록 (포럼인 경우 기본적으로 모든 토픽이 침묵인 selective 모드로 등록)"""
+    default_allowed = 1 if AUTO_APPROVE_GROUPS else 0
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO groups (chat_id, title, is_allowed, is_forum, topic_mode)
-            VALUES (?, ?, 0, ?, 'selective')
+            VALUES (?, ?, ?, ?, 'selective')
             ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, is_forum = excluded.is_forum
-        """, (chat_id, title, 1 if is_forum else 0))
+        """, (chat_id, title, default_allowed, 1 if is_forum else 0))
         conn.commit()
+
+
+# 하위 호환성 유지
+register_group_pending = register_group
 
 
 def set_group_allowed(chat_id: int, allowed: bool, title: str = "", is_forum: Optional[bool] = None):
@@ -202,13 +226,13 @@ def get_group_config(chat_id: int) -> Dict[str, Any]:
         if row:
             return {
                 "is_allowed": bool(row["is_allowed"]),
-                "lang_mode": row["lang_mode"],
+                "lang_mode": row["lang_mode"] or "all",
                 "is_enabled": bool(row["is_enabled"]),
                 "is_forum": bool(row["is_forum"]),
                 "topic_mode": row["topic_mode"] or "selective"
             }
         return {
-            "is_allowed": False,
+            "is_allowed": AUTO_APPROVE_GROUPS,
             "lang_mode": "all",
             "is_enabled": True,
             "is_forum": False,

@@ -114,29 +114,34 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def notify_admins_new_group(chat, inviter, context: ContextTypes.DEFAULT_TYPE):
-    """새 그룹방 연결 시 총괄 관리자들에게 1:1 원격 승인/거절 버튼 전송"""
+    """새 그룹방 연결 시 총괄 관리자들에게 1:1 알림 전송"""
     admin_ids = db.get_admin_ids()
     if not admin_ids:
         return
 
     inviter_name = f"@{inviter.username}" if inviter and inviter.username else (f"ID: {inviter.id}" if inviter else "알 수 없음")
     is_forum = bool(getattr(chat, "is_forum", False))
+    is_allowed = db.is_group_allowed(chat.id)
+    status_str = "🟢 정상 활성화 (번역 작동 중)" if is_allowed else "🟡 승인 대기 중"
 
     text = (
-        f"🔔 **신규 그룹 대화방 초대 감지**\n\n"
+        f"🔔 **신규 그룹 대화방 연결 감지**\n\n"
         f"• 그룹명: **{chat.title or '이름 없음'}**\n"
         f"• 그룹 ID: `{chat.id}`\n"
         f"• 포럼(주제) 여부: {'예' if is_forum else '아니오'}\n"
-        f"• 초대한 사람: {inviter_name}\n\n"
-        f"이 대화방에서 번역 봇 작동을 승인하시겠습니까?"
+        f"• 연결/초대자: {inviter_name}\n"
+        f"• 현재 상태: {status_str}\n\n"
+        f"인가되지 않은 대화방인 경우 아래 버튼으로 즉시 차단/퇴장시킬 수 있습니다."
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ 그룹 승인", callback_data=f"allow_grp:{chat.id}"),
-            InlineKeyboardButton("❌ 거절 및 퇴장", callback_data=f"ban_grp:{chat.id}"),
+            InlineKeyboardButton("❌ 차단 및 퇴장", callback_data=f"ban_grp:{chat.id}"),
         ]
     ]
+    if not is_allowed:
+        keyboard[0].insert(0, InlineKeyboardButton("✅ 그룹 승인", callback_data=f"allow_grp:{chat.id}"))
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     for a_id in admin_ids:
@@ -163,7 +168,7 @@ async def track_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYP
     if chat.type in ["group", "supergroup"]:
         if new_status in ["member", "administrator"]:
             is_forum = bool(getattr(chat, "is_forum", False))
-            db.register_group_pending(chat.id, chat.title or "", is_forum)
+            db.register_group(chat.id, chat.title or "", is_forum)
             await notify_admins_new_group(chat, inviter, context)
         elif new_status in ["left", "kicked"]:
             db.delete_group(chat.id)
@@ -434,26 +439,24 @@ async def cmd_revoke_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """방 안에서 직접 승인하는 현장 명령어 (총괄 관리자 전용)"""
+    """방 안에서 직접 승인하는 현장 명령어 (총괄 관리자 및 현장 방장/관리자 가능)"""
     chat = update.effective_chat
     user = update.effective_user
     message = update.effective_message
 
-    if not message or chat.type == "private" or not is_admin(user.id):
+    if not message or chat.type == "private":
+        return
+
+    if not await is_group_admin(update, context):
+        await safe_reply(message, "안내: 그룹 승인은 방장 또는 관리자만 가능합니다.")
         return
 
     is_forum = bool(getattr(chat, "is_forum", False))
     db.set_group_allowed(chat.id, True, chat.title or "", is_forum=is_forum)
 
+    guide = "✅ **이 대화방의 번역 기능이 정상 활성화되었습니다.**"
     if is_forum:
-        guide = (
-            "✅ **그룹 대화방이 승인되었습니다! (주제별 포럼 감지)**\n\n"
-            "🛡️ **초기 안전 모드 적용**: 도배 방지를 위해 기본적으로 모든 주제에서 번역이 꺼져(대기) 있습니다.\n\n"
-            "👉 방장/관리자님은 번역을 원하는 특정 주제(토픽)에 들어가서 **`/topic on`** 을 입력해 주세요!\n"
-            "*(모든 주제에서 전부 번역되길 원하시면 `/topic all` 입력)*"
-        )
-    else:
-        guide = "✅ **그룹 대화방이 정상 승인되었습니다.** 이제 번역이 동작합니다."
+        guide += "\n\n💡 기본적으로 모든 주제에서 번역되며, 특정 주제만 번역하길 원하시면 해당 토픽에서 `/topic on`을 입력해 주세요."
 
     await safe_reply(message, guide, parse_mode="Markdown")
 
@@ -464,10 +467,6 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
 
     if not message or chat.type == "private":
-        return
-
-    # S11: 미승인 그룹에서는 무반응
-    if not db.is_group_allowed(chat.id):
         return
 
     if not await is_group_admin(update, context):
@@ -486,7 +485,7 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True)
         conf = db.get_group_config(chat.id)
         topic_mode = conf.get("topic_mode", "selective")
-        status_str = "🟢 켜짐(ON)" if active else "⚪ 꺼짐(OFF)"
+        status_str = "🟢 켜짐(ON)" if active else "⚪ 꺼짐(대기)"
         mode_desc = "선택된 주제만 번역 (기본)" if topic_mode == "selective" else "모든 주제 번역"
 
         await safe_reply(
@@ -504,10 +503,12 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = args[0].lower()
 
     if action == "all":
+        db.set_group_allowed(chat.id, True, chat.title or "", is_forum=True)
         db.enable_all_topics(chat.id)
         await safe_reply(message, "🌐 이 그룹의 **모든 주제에서 번역이 활성화**되었습니다. (전체 모드)", parse_mode="Markdown")
     elif action == "on":
         target_thread = thread_id if thread_id is not None else 1
+        db.set_group_allowed(chat.id, True, chat.title or "", is_forum=True)
         db.enable_topic(chat.id, target_thread)
         await safe_reply(
             message,
@@ -565,10 +566,6 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
-    # S11: 미승인 그룹에서는 무반응
-    if chat.type != "private" and not db.is_group_allowed(chat.id):
-        return
-
     if chat.type != "private" and not await is_group_admin(update, context):
         await safe_reply(message, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
         return
@@ -581,6 +578,8 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     enabled = (args[0].lower() == "on")
+    if enabled and chat.type != "private":
+        db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, is_enabled=enabled)
     await safe_reply(message, f"✅ 번역 기능이 **{'켜짐(ON)' if enabled else '꺼짐(OFF)'}** 처리되었습니다.")
 
@@ -608,7 +607,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_group and not db.is_group_allowed(chat.id):
         return
 
-    if not is_approved_member(user.id):
+    if not is_group and not is_approved_member(user.id):
         return
 
     conf = db.get_group_config(chat.id)
@@ -630,7 +629,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_text = (
         "📊 **현재 상태**\n\n"
-        f"• 사용자 권한: {'총괄 관리자' if is_admin(user.id) else '승인 멤버'}\n"
+        f"• 사용자 권한: {'총괄 관리자' if is_admin(user.id) else '일반 사용자'}\n"
         f"• 대화방 유형: {'그룹 대화방' if is_group else '개인 1:1 대화'}\n"
         f"• 대화방 승인: {'✅ 승인됨' if group_auth else '🔒 미승인'}\n"
         f"{topic_info}"
@@ -652,7 +651,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != "private" and not db.is_group_allowed(chat.id):
         return
 
-    if not is_approved_member(user.id):
+    if chat.type == "private" and not is_approved_member(user.id):
         return
 
     admin_extra = ""
@@ -700,16 +699,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 아직 DB에 등록되지 않은 신규 그룹인 경우 등록 및 총괄 관리자 알림
         if not db.is_group_registered(chat.id):
             is_forum = bool(getattr(chat, "is_forum", False))
-            db.register_group_pending(chat.id, chat.title or "", is_forum)
+            db.register_group(chat.id, chat.title or "", is_forum)
             await notify_admins_new_group(chat, user, context)
-            return
 
         # 미승인 그룹인 경우 완전 무반응 (S11)
         if not db.is_group_allowed(chat.id):
+            logger.info(f"Group {chat.id} is blocked/unapproved. Skipping.")
             return
 
         is_forum = bool(getattr(chat, "is_forum", False))
         if not db.is_topic_translation_enabled(chat.id, message.message_thread_id, is_forum):
+            logger.info(f"Topic {message.message_thread_id} in {chat.id} is disabled. Skipping.")
             return
 
         conf = db.get_group_config(chat.id)
@@ -729,6 +729,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not targets:
         return
 
+    logger.info(f"Translating in chat_id={chat.id} from {source_lang} to {[t[0] for t in targets]}")
     results = []
     for target_code, flag in targets:
         translated = translation_service.translate(text, target_lang=target_code)
@@ -736,6 +737,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results.append(f"{flag} {translated}")
 
     if not results:
+        logger.warning(f"Translation produced empty result in chat_id={chat.id}")
         return
 
     reply_content = "\n".join(results)
@@ -745,6 +747,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_content,
         reply_to_message_id=message.message_id,
     )
+    logger.info(f"Translation sent in chat_id={chat.id}")
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
