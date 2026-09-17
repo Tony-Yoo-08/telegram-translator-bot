@@ -1,6 +1,10 @@
 import os
+import re
+import time
 import logging
 import threading
+from collections import OrderedDict
+from typing import Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from dotenv import load_dotenv
@@ -33,6 +37,7 @@ from translator import (
     UnifiedTranslationService,
     detect_source_language,
     get_translation_targets,
+    is_trivial_reaction,
 )
 
 # S8: 로그 마스킹 및 최소 로깅 설정
@@ -56,6 +61,82 @@ db.init_db()
 
 # 번역 서비스 인스턴스
 translation_service = UnifiedTranslationService(DEEPL_API_KEY)
+
+# --- 중복 번역 방지 캐시 (LRU / TTL) ---
+# 1. 메시지 원본 텍스트 캐시: (chat_id, message_id) -> text
+PROCESSED_MESSAGE_TEXTS = OrderedDict()
+MAX_TEXT_CACHE = 5000
+
+# 2. 봇의 번역 답장 메시지 ID 캐시: (chat_id, user_message_id) -> bot_reply_message_id
+BOT_TRANSLATION_REPLIES = OrderedDict()
+MAX_REPLY_CACHE = 5000
+
+# 3. 동일 방/토픽 내 최근 번역된 내용 캐시: (chat_id, thread_id, normalized_text) -> timestamp
+RECENT_TRANSLATED_TEXTS = OrderedDict()
+MAX_RECENT_TEXTS = 3000
+DUPLICATE_TEXT_WINDOW_SECONDS = 300  # 5분 이내 동일 텍스트 중복 번역 방지
+
+
+def get_cached_message_text(chat_id: int, message_id: int) -> Optional[str]:
+    """메시지 ID에 대해 캐시된 이전 텍스트 반환 (없으면 None)"""
+    return PROCESSED_MESSAGE_TEXTS.get((chat_id, message_id))
+
+
+def get_bot_reply_id(chat_id: int, message_id: int) -> Optional[int]:
+    """특정 사용자 메시지에 대응하는 봇 번역 메시지 ID 반환"""
+    return BOT_TRANSLATION_REPLIES.get((chat_id, message_id))
+
+
+def record_message_cache(
+    chat_id: int, message_id: int, text: str, reply_id: Optional[int] = None
+):
+    """메시지 텍스트 및 봇 답장 ID를 캐시에 기록 (LRU 유지)"""
+    key = (chat_id, message_id)
+    PROCESSED_MESSAGE_TEXTS[key] = text
+    if len(PROCESSED_MESSAGE_TEXTS) > MAX_TEXT_CACHE:
+        PROCESSED_MESSAGE_TEXTS.popitem(last=False)
+
+    if reply_id is not None:
+        BOT_TRANSLATION_REPLIES[key] = reply_id
+        if len(BOT_TRANSLATION_REPLIES) > MAX_REPLY_CACHE:
+            BOT_TRANSLATION_REPLIES.popitem(last=False)
+
+
+def is_already_processed(chat_id: int, message_id: int) -> bool:
+    """하위 호환용: 메시지 ID 캐시 존재 여부"""
+    return (chat_id, message_id) in PROCESSED_MESSAGE_TEXTS
+
+
+def mark_as_processed(
+    chat_id: int, message_id: int, text: str = "", reply_id: Optional[int] = None
+):
+    """하위 호환용: 메시지 캐시 등록"""
+    record_message_cache(chat_id, message_id, text, reply_id)
+
+
+def is_duplicate_content(chat_id: int, thread_id: Optional[int], text: str) -> bool:
+    """해당 대화방/토픽에서 동일한 내용이 최근 5분 이내에 이미 번역되었는지 확인"""
+    norm = re.sub(r'\s+', ' ', text).strip().lower()
+    target_thread = thread_id if thread_id is not None else 1
+    key = (chat_id, target_thread, norm)
+    now = time.time()
+
+    if key in RECENT_TRANSLATED_TEXTS:
+        last_time = RECENT_TRANSLATED_TEXTS[key]
+        if now - last_time < DUPLICATE_TEXT_WINDOW_SECONDS:
+            return True
+
+    return False
+
+
+def record_translated_content(chat_id: int, thread_id: Optional[int], text: str):
+    """번역된 내용을 캐시에 기록"""
+    norm = re.sub(r'\s+', ' ', text).strip().lower()
+    target_thread = thread_id if thread_id is not None else 1
+    key = (chat_id, target_thread, norm)
+    RECENT_TRANSLATED_TEXTS[key] = time.time()
+    if len(RECENT_TRANSLATED_TEXTS) > MAX_RECENT_TEXTS:
+        RECENT_TRANSLATED_TEXTS.popitem(last=False)
 
 
 async def safe_reply(message, text: str, **kwargs):
@@ -852,6 +933,7 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. effective_message 확인 (신규 메시지 및 수정된 메시지 모두 허용)
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
@@ -861,15 +943,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.is_bot:
         return
 
-    # 한글 및 단축 명령어 가로채기
-    if await handle_custom_or_korean_command(update, context):
+    current_text = message.text.strip()
+    if not current_text:
         return
+
+    # 2. 텍스트 변경 여부 확인 (메시지 수정 vs 단순 리액션/반응 구분)
+    previous_text = get_cached_message_text(chat.id, message.message_id)
+    is_edit = (previous_text is not None) or (update.edited_message is not None)
+
+    if previous_text is not None:
+        if previous_text == current_text:
+            # 텍스트 내용에 변화가 없음 -> 단순 이모지 리액션(반응 표시) 또는 중복 이벤트이므로 번역 제외
+            logger.info(f"Message {message.message_id} in chat {chat.id} text unchanged (reaction/duplicate). Skipping.")
+            return
+        logger.info(f"Message {message.message_id} in chat {chat.id} was EDITED. Updating translation.")
+    elif update.edited_message is not None:
+        logger.info(f"Message {message.message_id} in chat {chat.id} received as edited_message without cache. Processing translation.")
+
+    # 커스텀 및 한글 단축 명령어 가로채기
+    if await handle_custom_or_korean_command(update, context):
+        record_message_cache(chat.id, message.message_id, current_text)
+        return
+
+    # 3. 봇의 번역 답장에 대한 단순 인용/반응 필터링
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if message.reply_to_message.from_user.id == context.bot.id:
+            if is_trivial_reaction(message.text):
+                return
 
     # S10: 레이트 리밋 검사
     if not check_rate_limit(user.id):
         return
 
     # S11: 그룹 대화방 처리
+    thread_id = message.message_thread_id
+    is_forum_chat = False
     if chat.type != "private":
         # 아직 DB에 등록되지 않은 신규 그룹인 경우 등록 및 총괄 관리자 알림
         if not db.is_group_registered(chat.id):
@@ -883,7 +991,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         conf = db.get_group_config(chat.id)
-        thread_id = message.message_thread_id
         is_forum_chat = (
             bool(getattr(message, "is_topic_message", False))
             or (thread_id is not None and thread_id != 0)
@@ -903,9 +1010,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         mode = "all"
 
-    text = message.text
+    # 4. 동일 대화방/토픽 내 5분 이내 동일 텍스트 중복 번역 방지 (메시지 수정인 경우는 제외)
+    current_target_thread = thread_id if (chat.type != "private" and is_forum_chat) else None
+    if not is_edit and is_duplicate_content(chat.id, current_target_thread, current_text):
+        logger.info(f"Duplicate content in chat {chat.id}. Skipping duplicate translation.")
+        return
 
-    source_lang = detect_source_language(text)
+    source_lang = detect_source_language(current_text)
     if not source_lang:
         return
 
@@ -916,7 +1027,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Translating in chat_id={chat.id} from {source_lang} to {[t[0] for t in targets]}")
     results = []
     for target_code, flag in targets:
-        translated = translation_service.translate(text, target_lang=target_code)
+        translated = translation_service.translate(current_text, target_lang=target_code)
         if translated:
             results.append(f"{flag} {translated}")
 
@@ -926,12 +1037,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_content = "\n".join(results)
 
-    await safe_reply(
-        message,
-        reply_content,
-        reply_to_message_id=message.message_id,
-    )
-    logger.info(f"Translation sent in chat_id={chat.id}")
+    # 5. 전송 처리: 메시지 수정인 경우 기존 봇 번역 메시지 내용 수정 시도, 실패 시 신규 답장 전송
+    reply_msg_id = None
+    if is_edit:
+        prev_reply_id = get_bot_reply_id(chat.id, message.message_id)
+        if prev_reply_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat.id,
+                    message_id=prev_reply_id,
+                    text=reply_content,
+                )
+                reply_msg_id = prev_reply_id
+                logger.info(f"Successfully edited existing translation {prev_reply_id} for message {message.message_id}")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "message is not modified" in err_str:
+                    logger.info(f"Translation output unchanged for message {message.message_id}. No edit needed.")
+                    reply_msg_id = prev_reply_id
+                else:
+                    logger.warning(f"Failed to edit existing translation {prev_reply_id}: {e}. Sending new reply.")
+
+    if not reply_msg_id:
+        sent_msg = await safe_reply(
+            message,
+            reply_content,
+            reply_to_message_id=message.message_id,
+        )
+        if sent_msg:
+            reply_msg_id = sent_msg.message_id
+
+    # 번역 성공 후 메시지 텍스트 및 봇 답장 ID 캐시에 등록
+    record_message_cache(chat.id, message.message_id, current_text, reply_msg_id)
+    record_translated_content(chat.id, current_target_thread, current_text)
+    logger.info(f"Translation completed in chat_id={chat.id} (is_edit={is_edit})")
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
