@@ -39,7 +39,7 @@ def init_db():
                 lang_mode TEXT DEFAULT 'all',
                 is_enabled INTEGER DEFAULT 1,
                 is_forum INTEGER DEFAULT 0,
-                topic_mode TEXT DEFAULT 'selective',
+                topic_mode TEXT DEFAULT 'all',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -171,13 +171,13 @@ def is_group_allowed(chat_id: int) -> bool:
 
 
 def register_group(chat_id: int, title: str = "", is_forum: bool = False):
-    """신규 그룹 등록 (포럼인 경우 기본적으로 모든 토픽이 침묵인 selective 모드로 등록)"""
+    """신규 그룹 등록 (기본적으로 모든 토픽이 활성화되는 all 모드로 등록하여 배포 후 재설정 불필요)"""
     default_allowed = 1 if AUTO_APPROVE_GROUPS else 0
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO groups (chat_id, title, is_allowed, is_forum, topic_mode)
-            VALUES (?, ?, ?, ?, 'selective')
+            VALUES (?, ?, ?, ?, 'all')
             ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, is_forum = excluded.is_forum
         """, (chat_id, title, default_allowed, 1 if is_forum else 0))
         conn.commit()
@@ -193,7 +193,7 @@ def set_group_allowed(chat_id: int, allowed: bool, title: str = "", is_forum: Op
         if is_forum is not None:
             cursor.execute("""
                 INSERT INTO groups (chat_id, is_allowed, title, is_forum, topic_mode)
-                VALUES (?, ?, ?, ?, 'selective')
+                VALUES (?, ?, ?, ?, 'all')
                 ON CONFLICT(chat_id) DO UPDATE SET 
                     is_allowed = excluded.is_allowed, 
                     title = excluded.title,
@@ -229,14 +229,14 @@ def get_group_config(chat_id: int) -> Dict[str, Any]:
                 "lang_mode": row["lang_mode"] or "all",
                 "is_enabled": bool(row["is_enabled"]),
                 "is_forum": bool(row["is_forum"]),
-                "topic_mode": row["topic_mode"] or "selective"
+                "topic_mode": row["topic_mode"] or "all"
             }
         return {
             "is_allowed": AUTO_APPROVE_GROUPS,
             "lang_mode": "all",
             "is_enabled": True,
             "is_forum": False,
-            "topic_mode": "selective"
+            "topic_mode": "all"
         }
 
 
@@ -263,7 +263,7 @@ def is_topic_translation_enabled(chat_id: int, thread_id: Optional[int], is_foru
         return True
 
     effective_thread = thread_id if thread_id is not None else 1
-    topic_mode = conf.get("topic_mode", "selective")
+    topic_mode = conf.get("topic_mode", "all")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -273,10 +273,11 @@ def is_topic_translation_enabled(chat_id: int, thread_id: Optional[int], is_foru
         """, (chat_id, effective_thread))
         row = cursor.fetchone()
 
-        if topic_mode == "all":
-            return not (row and row["is_enabled"] == 0)
-        else:
+        if topic_mode == "selective":
             return bool(row and row["is_enabled"] == 1)
+        else:
+            # 기본 all 모드: 명시적으로 0(꺼짐)으로 등록된 토픽만 제외하고 모두 번역
+            return not (row and row["is_enabled"] == 0)
 
 
 def enable_topic(chat_id: int, thread_id: int):
@@ -287,7 +288,6 @@ def enable_topic(chat_id: int, thread_id: int):
             VALUES (?, ?, 1)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET is_enabled = 1
         """, (chat_id, thread_id))
-        cursor.execute("UPDATE groups SET topic_mode = 'selective' WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
 
@@ -299,7 +299,6 @@ def disable_topic(chat_id: int, thread_id: int):
             VALUES (?, ?, 0)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET is_enabled = 0
         """, (chat_id, thread_id))
-        cursor.execute("UPDATE groups SET topic_mode = 'selective' WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
 

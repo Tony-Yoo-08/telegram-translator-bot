@@ -173,6 +173,68 @@ async def safe_reply(message, text: str, **kwargs):
         return None
 
 
+async def send_command_feedback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    delete_trigger: bool = True,
+    **kwargs
+):
+    """
+    대화방 청결 유지를 위한 스마트 명령어 피드백 전송:
+    1. 1:1 개인 대화(DM)에서 실행된 경우: 개인 대화창에 정상 회신
+    2. 그룹 대화방에서 실행된 경우:
+       - 그룹 대화방의 원본 명령어 메시지 자동 삭제 (채팅방 청결 유지)
+       - 실행한 관리자의 1:1 봇 개인 대화(DM)로 결과 전송
+       - 관리자가 봇과 1:1 대화를 시작하지 않아 DM이 차단된 경우, 그룹에 1회성 안내 전송
+    """
+    chat = update.effective_chat
+    message = update.effective_message
+    user = update.effective_user
+
+    if not message:
+        return None
+
+    # 1. 1:1 개인 대화(DM)인 경우
+    if not chat or chat.type == "private":
+        return await safe_reply(message, text, **kwargs)
+
+    # 2. 그룹 대화방인 경우
+    # 2-1. 원본 명령어 메시지 삭제 시도 (봇이 메시지 삭제 권한을 가지고 있는 경우)
+    if delete_trigger:
+        try:
+            await message.delete()
+        except Exception as e:
+            logger.debug(f"Could not delete command trigger message: {e}")
+
+    # 2-2. 관리자의 1:1 DM으로 결과 전송 시도
+    group_title = chat.title or "그룹"
+    thread_info = ""
+    if getattr(message, "is_topic_message", False) and message.message_thread_id:
+        thread_info = f" (토픽 ID: {message.message_thread_id})"
+
+    dm_text = f"🏢 **[{group_title}{thread_info}] 관리 안내**\n\n{text}"
+
+    try:
+        sent = await context.bot.send_message(
+            chat_id=user.id,
+            text=dm_text,
+            **kwargs
+        )
+        logger.info(f"Command feedback sent secretly to user {user.id} in 1:1 DM.")
+        return sent
+    except Exception as e:
+        logger.warning(f"Could not send DM to user {user.id} (user likely hasn't /started bot in DM): {e}")
+
+    # 2-3. 관리자가 봇과 1:1 대화를 아직 튼 적이 없는 경우 그룹으로 폴백 안내
+    fallback_text = (
+        f"{text}\n\n"
+        f"*(💡 대화방 청결 팁: 봇과의 1:1 대화창에서 `/start`를 한 번 눌러두시면, "
+        f"다음부터는 대화방을 어지럽히지 않고 관리자 개인 대화창으로 조용히 전송됩니다!)*"
+    )
+    return await safe_reply(message, fallback_text, **kwargs)
+
+
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     권한 확인: 봇 총괄 관리자이거나, 해당 텔레그램 그룹의 실제 방장(Owner)/관리자(Admin)인지 확인
@@ -538,7 +600,7 @@ async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not await is_group_admin(update, context):
-        await safe_reply(message, "안내: 그룹 승인은 방장 또는 관리자만 가능합니다.")
+        await send_command_feedback(update, context, "안내: 그룹 승인은 방장 또는 관리자만 가능합니다.")
         return
 
     is_forum = bool(getattr(chat, "is_forum", False))
@@ -558,7 +620,7 @@ async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 모든 주제에서 동시에 번역을 켜시려면 `토픽 all` (또는 `/topic all`)을 입력해 주세요."
         )
 
-    await safe_reply(message, guide, parse_mode="Markdown")
+    await send_command_feedback(update, context, guide, parse_mode="Markdown")
 
 
 async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,7 +632,7 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not await is_group_admin(update, context):
-        await safe_reply(message, "안내: 토픽 설정은 대화방 관리자만 변경할 수 있습니다.")
+        await send_command_feedback(update, context, "안내: 토픽 설정은 대화방 관리자만 변경할 수 있습니다.")
         return
 
     # 스레드(토픽) ID 추출 (토픽 메시지인 경우 message_thread_id, 없으면 1)
@@ -593,19 +655,19 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "help":
         active = db.is_topic_translation_enabled(chat.id, thread_id, is_forum=True)
         conf = db.get_group_config(chat.id)
-        topic_mode = conf.get("topic_mode", "selective")
+        topic_mode = conf.get("topic_mode", "all")
         status_str = "🟢 켜짐 (번역 작동 중)" if active else "⚪ 꺼짐 (대기 중)"
-        mode_desc = "선택된 주제만 번역 (개별 모드)" if topic_mode == "selective" else "모든 주제 번역 (전체 모드)"
+        mode_desc = "모든 주제 번역 (전체 모드)" if topic_mode == "all" else "선택된 주제만 번역 (개별 모드)"
 
         text = (
             f"📌 **현재 주제 번역 상태: {status_str}**\n"
             f"• 그룹 토픽 설정: `{mode_desc}`\n\n"
             "**주제별 제어 명령어**:\n"
-            "• `/topic on` (또는 `토픽 on` / `토픽 켜기`) : **현재 이 주제에서만** 번역 켜기 (다른 방 조용)\n"
+            "• `/topic on` (또는 `토픽 on` / `토픽 켜기`) : **현재 이 주제에서만** 번역 켜기\n"
             "• `/topic off` (또는 `토픽 off` / `토픽 끄기`) : 현재 이 주제에서 번역 끄기\n"
             "• `/topic all` (또는 `토픽 all` / `토픽 전체`) : 이 그룹의 모든 주제에서 번역 켜기"
         )
-        await safe_reply(message, text, parse_mode="Markdown")
+        await send_command_feedback(update, context, text, parse_mode="Markdown")
         return
 
     if action == "all":
@@ -617,7 +679,7 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• 모든 토픽에서 한국어, 영어, 베트남어가 실시간 번역됩니다.\n"
             "• 특정 주제만 번역을 끄고 싶으실 경우, 해당 주제에서 `/topic off`를 입력해 주세요."
         )
-        await safe_reply(message, text, parse_mode="Markdown")
+        await send_command_feedback(update, context, text, parse_mode="Markdown")
     elif action == "on":
         target_thread = thread_id if thread_id is not None else 1
         db.set_group_allowed(chat.id, True, chat.title or "", is_forum=True)
@@ -626,10 +688,9 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔔 **[현재 주제 실시간 번역 켜짐 (ON)]**\n\n"
             "✅ **현재 주제(토픽)의 실시간 자동 번역이 활성화되었습니다!**\n\n"
             "• 이 주제에서 올라오는 대화가 실시간으로 자동 번역됩니다.\n"
-            "• 공지방, 잡담방 등 다른 주제에서는 번역되지 않고 조용히 유지됩니다.\n\n"
-            "💡 번역을 끄려면 언제든 `/topic off`를 입력해 주세요."
+            "• 특정 주제만 번역을 끄려면 해당 주제에서 `/topic off`를 입력해 주세요."
         )
-        await safe_reply(message, text, parse_mode="Markdown")
+        await send_command_feedback(update, context, text, parse_mode="Markdown")
     elif action == "off":
         target_thread = thread_id if thread_id is not None else 1
         db.disable_topic(chat.id, target_thread)
@@ -639,7 +700,7 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "이제 이 주제의 대화는 번역되지 않습니다.\n\n"
             "💡 다시 번역을 켜려면 `/topic on`을 입력해 주세요."
         )
-        await safe_reply(message, text, parse_mode="Markdown")
+        await send_command_feedback(update, context, text, parse_mode="Markdown")
 
 
 async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -651,7 +712,7 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type != "private" and not await is_group_admin(update, context):
-        await safe_reply(message, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
+        await send_command_feedback(update, context, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
         return
 
     args = context.args
@@ -670,8 +731,9 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ko-vi": "한-베 전용 모드 (한국어 ↔ 베트남어)",
             "ko-en": "한-영 전용 모드 (한국어 ↔ 영어)"
         }
-        await safe_reply(
-            message,
+        await send_command_feedback(
+            update,
+            context,
             f"📊 **현재 언어 모드**: **`{current_names.get(current, current)}`**\n\n"
             "**언어 모드 변경 명령어**:\n"
             "• `/lang all` (또는 `언어 all` / `언어 전체`): 3개국어 통합 모드 (한국어 ➡️ 영+베 동시 번역)\n"
@@ -715,7 +777,7 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         desc = f"✅ 언어 모드가 `{new_mode}`로 변경되었습니다."
 
-    await safe_reply(message, desc, parse_mode="Markdown")
+    await send_command_feedback(update, context, desc, parse_mode="Markdown")
 
 
 async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -727,7 +789,7 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type != "private" and not await is_group_admin(update, context):
-        await safe_reply(message, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
+        await send_command_feedback(update, context, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
         return
 
     args = context.args
@@ -739,13 +801,13 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         conf = db.get_group_config(chat.id)
         status_str = "ON (켜짐)" if conf.get("is_enabled", True) else "OFF (꺼짐)"
-        await safe_reply(message, f"📊 현재 번역 기능 상태: **{status_str}** (`/translate on/off` 또는 `번역 on/off` / `번역 켜기/끄기`)")
+        await send_command_feedback(update, context, f"📊 현재 번역 기능 상태: **{status_str}** (`/translate on/off` 또는 `번역 on/off` / `번역 켜기/끄기`)")
         return
 
     if enabled and chat.type != "private":
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, is_enabled=enabled)
-    await safe_reply(message, f"✅ 번역 기능이 **{'켜짐(ON)' if enabled else '꺼짐(OFF)'}** 처리되었습니다.")
+    await send_command_feedback(update, context, f"✅ 번역 기능이 **{'켜짐(ON)' if enabled else '꺼짐(OFF)'}** 처리되었습니다.")
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -756,7 +818,7 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat.type != "private" and not db.is_group_allowed(chat.id):
         return
-    await safe_reply(message, f"본인의 식별자(ID)입니다:\n`{user.id}`", parse_mode="Markdown")
+    await send_command_feedback(update, context, f"본인의 식별자(ID)입니다:\n`{user.id}`", parse_mode="Markdown")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -787,10 +849,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             thread_id = 1
         target_thread = thread_id if thread_id is not None else 1
         active = db.is_topic_translation_enabled(chat.id, target_thread, is_forum=True)
-        topic_mode = conf.get("topic_mode", "selective")
+        topic_mode = conf.get("topic_mode", "all")
         topic_info = (
             f"• 대화방 구조: 포럼 (주제별 대화방)\n"
-            f"• 그룹 토픽 모드: {'선택된 주제만 번역 (개별 모드)' if topic_mode == 'selective' else '모든 주제 번역 (전체 모드)'}\n"
+            f"• 그룹 토픽 모드: {'모든 주제 번역 (전체 모드)' if topic_mode == 'all' else '선택된 주제만 번역 (개별 모드)'}\n"
             f"• 현재 주제(ID: {target_thread}): {'🟢 켜짐(ON)' if active else '⚪ 꺼짐(대기)'}\n"
         )
 
@@ -804,7 +866,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 언어 모드: `{mode}`\n"
         f"• 엔진: `{translation_service.get_engine_name()}`\n"
     )
-    await safe_reply(message, status_text, parse_mode="Markdown")
+    await send_command_feedback(update, context, status_text, parse_mode="Markdown")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -844,7 +906,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/myid` : 본인 식별 번호 확인\n"
         f"{admin_extra}"
     )
-    await safe_reply(message, text, parse_mode="Markdown")
+    await send_command_feedback(update, context, text, parse_mode="Markdown")
 
 
 async def handle_custom_or_korean_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
