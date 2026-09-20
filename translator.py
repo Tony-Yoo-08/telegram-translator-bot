@@ -142,6 +142,105 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
     return []
 
 
+def is_bilingual_ko_en(text: str) -> bool:
+    """
+    한글과 영문이 함께 수록된 양방향 게시글(생명의 어록 등) 판별
+    - 한글 음절 15자 이상 & 영문 단어 10단어 이상
+    - 또는 어록 관련 키워드가 포함된 경우 완화된 기준(한글 8자 이상, 영문 6단어 이상) 적용
+    """
+    if not text:
+        return False
+
+    ko_chars = len(re.findall(r'[가-힣]', text))
+    en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
+
+    quote_keywords = [
+        "어록", "말씀", "생명의 어록", "신천지", "약속의 목자", "교회 말씀",
+        "quote", "quote of life", "shincheonji", "promised pastor", "church"
+    ]
+    has_keyword = any(kw in text.lower() for kw in quote_keywords)
+
+    if has_keyword:
+        return (ko_chars >= 8 and en_words >= 6)
+
+    return (ko_chars >= 15 and en_words >= 10)
+
+
+def is_image_quote_caption(text: str, has_photo: bool = False) -> bool:
+    """
+    사진과 함께 올라온 영문 생명의 어록 캡션인지 판별
+    (사진에 한글이 이미 그래픽으로 박혀 있고 캡션은 영어인 유형)
+    """
+    if not text or not has_photo:
+        return False
+
+    lower = text.lower()
+    quote_en_keywords = [
+        "quote of life", "quote", "promised pastor",
+        "word of life", "words of life", "shincheonji"
+    ]
+    is_quote = any(kw in lower for kw in quote_en_keywords)
+
+    en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
+    ko_chars = len(re.findall(r'[가-힣]', text))
+
+    # 캡션에 한글이 거의 없고, 영문이 풍부하며 어록 키워드가 있거나 영문 단어 15단어 이상
+    if ko_chars < 5:
+        if is_quote or en_words >= 15:
+            return True
+
+    return False
+
+
+def extract_korean_section(text: str) -> str:
+    """한-영 병기 텍스트에서 베트남어 번역을 위한 한글 원문 섹션 추출"""
+    paragraphs = text.split("\n\n")
+    ko_paragraphs = [p.strip() for p in paragraphs if re.search(r'[가-힣]', p) and p.strip()]
+    if ko_paragraphs:
+        return "\n\n".join(ko_paragraphs)
+    lines = [line.strip() for line in text.splitlines() if re.search(r'[가-힣]', line) and line.strip()]
+    return "\n".join(lines) if lines else text
+
+
+def determine_translation_plan(
+    text: str, mode: str = "all", has_photo: bool = False
+) -> Tuple[List[Tuple[str, str]], str]:
+    """
+    메시지 내용 및 사진 첨부 여부에 따라 번역 대상 언어와 번역할 텍스트 결정
+    반환값: (targets, text_to_translate)
+    - targets: [(lang_code, flag_emoji), ...]
+    - text_to_translate: 실제로 번역기에 전달할 텍스트
+    """
+    mode = mode.lower()
+
+    # 1. 유형 1: 한글+영어 동시 수록된 텍스트 어록
+    if is_bilingual_ko_en(text):
+        if mode in ["all", "ko-vi"]:
+            # 이미 영문이 제공되었으므로 영어는 번역하지 않고 베트남어만 번역
+            ko_section = extract_korean_section(text)
+            return ([("vi", "🇻🇳")], ko_section)
+        elif mode == "ko-en":
+            # 한-영 모드 방에서는 한글과 영어가 이미 다 있으므로 번역 불필요 (스킵)
+            return ([], "")
+
+    # 2. 유형 2: 사진(한글 이미지) + 영문 캡션 어록
+    if is_image_quote_caption(text, has_photo=has_photo):
+        if mode in ["all", "ko-vi"]:
+            # 사진에 한글이 있고 캡션에 영어가 있으므로 베트남어만 번역
+            return ([("vi", "🇻🇳")], text)
+        elif mode == "ko-en":
+            # 한-영 모드 방에서는 이미 사진(한글)과 캡션(영어)이 있으므로 번역 불필요 (스킵)
+            return ([], "")
+
+    # 3. 일반 메시지 처리
+    source_lang = detect_source_language(text)
+    if not source_lang:
+        return ([], "")
+
+    targets = get_translation_targets(source_lang, mode=mode)
+    return (targets, text)
+
+
 def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
     """Google GTX POST API 번역 (S6: 최대 입력 길이 4000자 제한 적용)"""
     if len(text) > 4000:

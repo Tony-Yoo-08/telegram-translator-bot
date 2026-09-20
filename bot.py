@@ -37,6 +37,7 @@ from translator import (
     UnifiedTranslationService,
     detect_source_language,
     get_translation_targets,
+    determine_translation_plan,
     is_trivial_reaction,
 )
 
@@ -1000,14 +1001,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
-    if not message or not message.text or not user:
+    if not message or not user:
         return
     if user.is_bot:
         return
 
-    current_text = message.text.strip()
+    raw_text = message.text or message.caption or ""
+    current_text = raw_text.strip()
     if not current_text:
         return
+
+    has_photo = bool(message.photo)
 
     # 2. 텍스트 변경 여부 확인 (메시지 수정 vs 단순 리액션/반응 구분)
     previous_text = get_cached_message_text(chat.id, message.message_id)
@@ -1030,7 +1034,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. 봇의 번역 답장에 대한 단순 인용/반응 필터링
     if message.reply_to_message and message.reply_to_message.from_user:
         if message.reply_to_message.from_user.id == context.bot.id:
-            if is_trivial_reaction(message.text):
+            if is_trivial_reaction(current_text):
                 return
 
     # S10: 레이트 리밋 검사
@@ -1078,18 +1082,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Duplicate content in chat {chat.id}. Skipping duplicate translation.")
         return
 
-    source_lang = detect_source_language(current_text)
-    if not source_lang:
+    targets, text_to_translate = determine_translation_plan(
+        current_text, mode=mode, has_photo=has_photo
+    )
+    if not targets or not text_to_translate:
+        logger.info(f"No translation needed for message in chat_id={chat.id} (mode={mode}). Skipping.")
         return
 
-    targets = get_translation_targets(source_lang, mode=mode)
-    if not targets:
-        return
-
-    logger.info(f"Translating in chat_id={chat.id} from {source_lang} to {[t[0] for t in targets]}")
+    logger.info(f"Translating in chat_id={chat.id} to {[t[0] for t in targets]} (has_photo={has_photo})")
     results = []
     for target_code, flag in targets:
-        translated = translation_service.translate(current_text, target_lang=target_code)
+        translated = translation_service.translate(text_to_translate, target_lang=target_code)
         if translated:
             results.append(f"{flag} {translated}")
 
@@ -1203,7 +1206,7 @@ def main():
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(ChatMemberHandler(track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
 
     app.add_error_handler(global_error_handler)
 

@@ -83,5 +83,83 @@ class TestTopicModeDefaults(unittest.TestCase):
         self.assertTrue(enabled)
 
 
+class TestBilingualAndImageQuoteTranslation(unittest.TestCase):
+    def test_type_1_bilingual_post_all_mode(self):
+        from translator import determine_translation_plan, is_bilingual_ko_en
+
+        text = (
+            "💌 신 42(2025). 10. 12. 서울야고보지파 서울교회 말씀\n\n"
+            '"그냥 입으로만 형식적으로 신앙한다 교회 간다, 그런 생각 그만하고 진짜로 이 말씀을 내 마음에 기록을 하면 '
+            '내가 걸어 다니는 성경책이 되겠죠 몇 년이 됐는데 아직까지 그것을 못했다면 말이나 되겠습니까? '
+            '신앙이라는 것이 뭡니까? 이 말씀이 영생의 말씀이죠. 예수의 피와 살을 먹어야 영생한다고 요 6장에 기록돼 있질 않습니까? '
+            '이거를 마음에 인 맞아야만 이 말씀을 먹은 것이 되겠죠."\n\n'
+            "💌 Shincheonji 42 (2025). October 12 — Word from Seoul Church, Seoul James Tribe\n\n"
+            '“Let us stop thinking that faith is simply something we practice formally with our lips and simply by going to church. '
+            'If I truly write this Word on my heart, then I will become a walking Bible, right? If several years have passed and I still have not done that, '
+            'does that even make sense? What is faith? This Word is the Word of eternal life. Is it not written in John 6 that we must eat Jesus’ flesh '
+            'and drink his blood in order to have eternal life? Only when this Word is sealed in our hearts can it be said that we have truly eaten this Word.”'
+        )
+
+        self.assertTrue(is_bilingual_ko_en(text))
+
+        # all 모드: 이미 영문이 제공되었으므로 영문 번역은 제외하고 베트남어만 단독 번역
+        targets, text_to_translate = determine_translation_plan(text, mode="all", has_photo=False)
+        self.assertEqual(targets, [("vi", "🇻🇳")])
+        self.assertIn("서울교회 말씀", text_to_translate)
+        self.assertNotIn("Let us stop thinking", text_to_translate)
+
+        # ko-en 모드: 한글과 영어가 이미 다 있으므로 번역 스킵 (빈 타겟)
+        targets_koen, _ = determine_translation_plan(text, mode="ko-en", has_photo=False)
+        self.assertEqual(targets_koen, [])
+
+    def test_type_2_image_quote_caption(self):
+        from translator import determine_translation_plan, is_image_quote_caption
+
+        caption = (
+            "📖 Quote of Life from the Promised Pastor\n\n"
+            "At times, painful things overwhelm me.\n"
+            "In anguish, I want to beat the ground and weep toward heaven.\n\n"
+            "But at times like these,\n"
+            "I look upon Jesus’ suffering on the cross.\n\n"
+            "To once again look upon\n"
+            "the suffering Jesus and his disciples endured as they faced death—\n\n"
+            "this may be called\n"
+            "“a heart that has become one,”\n"
+            "born from the bond we have formed with Jesus."
+        )
+
+        self.assertTrue(is_image_quote_caption(caption, has_photo=True))
+        # 사진이 없는 일반 텍스트인 경우 false
+        self.assertFalse(is_image_quote_caption(caption, has_photo=False))
+
+        # all 모드: 사진에 한글이 있으므로 캡션에 대해 베트남어만 번역
+        targets, text_to_translate = determine_translation_plan(caption, mode="all", has_photo=True)
+        self.assertEqual(targets, [("vi", "🇻🇳")])
+        self.assertEqual(text_to_translate, caption)
+
+        # ko-en 모드: 사진(한글)과 캡션(영어)이 이미 있으므로 번역 스킵
+        targets_koen, _ = determine_translation_plan(caption, mode="ko-en", has_photo=True)
+        self.assertEqual(targets_koen, [])
+
+    def test_regular_messages_unaffected(self):
+        from translator import determine_translation_plan
+
+        # 일반 한글 메시지 -> all 모드에서 영+베 번역
+        targets, _ = determine_translation_plan("안녕하세요! 오늘 공지사항 확인 부탁드립니다.", mode="all", has_photo=False)
+        self.assertEqual(targets, [("en", "🇺🇸"), ("vi", "🇻🇳")])
+
+        # 일반 한글 메시지 -> ko-en 모드에서 영어만 번역
+        targets, _ = determine_translation_plan("안녕하세요! 오늘 공지사항 확인 부탁드립니다.", mode="ko-en", has_photo=False)
+        self.assertEqual(targets, [("en", "🇺🇸")])
+
+        # 일반 영어 메시지 -> all 모드에서 한+베 번역
+        targets, _ = determine_translation_plan("Hello everyone, please check the announcement.", mode="all", has_photo=False)
+        self.assertEqual(targets, [("ko", "🇰🇷"), ("vi", "🇻🇳")])
+
+        # 일반 영어 메시지 -> ko-en 모드에서 한국어만 번역
+        targets, _ = determine_translation_plan("Hello everyone, please check the announcement.", mode="ko-en", has_photo=False)
+        self.assertEqual(targets, [("ko", "🇰🇷")])
+
+
 if __name__ == "__main__":
     unittest.main()
