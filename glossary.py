@@ -6,56 +6,47 @@ import logging
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 logger = logging.getLogger("GlossaryManager")
 
 CACHE_FILE = Path(__file__).parent / "glossary_cache.json"
 
+# 이미지에 확인된 기본 12개 시트 탭 목록 (자동 검색 실패 시 폴백 및 기본 탐색용)
+KNOWN_SHEET_NAMES = [
+    "초중고 센터",
+    "말씀/실상 단어집",
+    "예배",
+    "교육(인재양성)/심방",
+    "섭외",
+    "SCJ",
+    "24부서 및 기타부서 명칭",
+    "전도",
+    "직책",
+    "내무부 행정 (자장부청)",
+    "공식 문서/책자",
+    "공식 행사 및 교육명",
+]
 
-def normalize_sheet_url(url: str) -> str:
-    """
-    일반적인 구글 스프레드시트 공유/편집 URL을 CSV 다운로드 URL로 자동 정규화
-    지원 형식:
-    - https://docs.google.com/spreadsheets/d/{ID}/edit#gid={GID}
-    - https://docs.google.com/spreadsheets/d/{ID}/edit?gid={GID}
-    - https://docs.google.com/spreadsheets/d/{ID}/view
-    - 이미 export?format=csv 형태인 경우 그대로 유지
-    """
-    if not url or "docs.google.com/spreadsheets" not in url:
-        return url
 
-    # 이미 export?format=csv 형태인 경우
-    if "export?format=csv" in url or "output=csv" in url:
-        return url
-
-    # 스프레드시트 ID 추출
-    match_id = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
-    if not match_id:
-        return url
-
-    doc_id = match_id.group(1)
-
-    # gid 추출 (시트 탭 ID)
-    gid = "0"
-    match_gid = re.search(r"[?&#]gid=([0-9]+)", url)
-    if match_gid:
-        gid = match_gid.group(1)
-
-    return f"https://docs.google.com/spreadsheets/d/{doc_id}/export?format=csv&gid={gid}"
+def extract_doc_id(url: str) -> Optional[str]:
+    """구글 스프레드시트 URL에서 doc_id 추출"""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    return match.group(1) if match else None
 
 
 class GlossaryManager:
     """
-    구글 스프레드시트 연동 및 후처리 번역 치환 관리자
-    - 구글 시트 CSV 자동 다운로드 및 스마트 컬럼 매핑
+    구글 스프레드시트의 모든 탭(다중 시트) 자동 연동 및 후처리 번역 치환 관리자
+    - 모든 시트 탭(초중고 센터, 말씀/실상 단어집, 예배, 부서명 등)을 일괄 수집
+    - 스마트 컬럼 헤더 감지 (한글, 영문, 베트남어, 동의어)
     - 로컬 캐시(glossary_cache.json) 보관으로 오프라인 및 장애 방지
     - 단어 길이 역순 정렬 및 단어 경계(\b)를 고려한 안전한 후처리 치환
     """
 
     def __init__(self, sheet_url: str = ""):
         self.raw_sheet_url = sheet_url.strip() if sheet_url else ""
-        self.csv_url = normalize_sheet_url(self.raw_sheet_url)
+        self.doc_id = extract_doc_id(self.raw_sheet_url)
 
         # 타겟 언어별 용어 매핑: {"en": [(ko_term, en_term), ...], "vi": [(ko_term, vi_term), ...]}
         self.terms: Dict[str, List[Tuple[str, str]]] = {"en": [], "vi": []}
@@ -66,6 +57,7 @@ class GlossaryManager:
 
         self.last_sync_time: float = 0
         self.loaded_count: int = 0
+        self.loaded_sheet_count: int = 0
 
         # 초기 로컬 캐시 로드
         self.load_from_cache()
@@ -86,7 +78,8 @@ class GlossaryManager:
             self.synonym_to_main = data.get("synonyms", [])
             self.last_sync_time = data.get("timestamp", 0)
             self.loaded_count = len(self.terms["en"]) + len(self.terms["vi"])
-            logger.info(f"Loaded {self.loaded_count} glossary terms from local cache.")
+            self.loaded_sheet_count = data.get("sheet_count", 0)
+            logger.info(f"Loaded {self.loaded_count} glossary terms from local cache ({self.loaded_sheet_count} sheets).")
             return True
         except Exception as e:
             logger.warning(f"Failed to load glossary cache: {e}")
@@ -101,6 +94,7 @@ class GlossaryManager:
                 "direct_en": self.direct_replacements["en"],
                 "direct_vi": self.direct_replacements["vi"],
                 "synonyms": self.synonym_to_main,
+                "sheet_count": self.loaded_sheet_count,
                 "timestamp": self.last_sync_time,
             }
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
@@ -109,37 +103,86 @@ class GlossaryManager:
         except Exception as e:
             logger.warning(f"Failed to save glossary cache: {e}")
 
-
-    def fetch_sheet_csv(self) -> Optional[str]:
-        """구글 스프레드시트 CSV 다운로드"""
-        if not self.csv_url:
-            return None
-
+    def fetch_url_content(self, url: str) -> Optional[str]:
+        """HTTP 요청으로 텍스트 컨텐츠 다운로드"""
         try:
             req = urllib.request.Request(
-                self.csv_url,
+                url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 }
             )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                content = response.read().decode("utf-8")
-                return content
+            with urllib.request.urlopen(req, timeout=12) as response:
+                return response.read().decode("utf-8")
         except Exception as e:
-            logger.error(f"Failed to download Google Sheet CSV: {e}")
+            logger.debug(f"Fetch failed for {url}: {e}")
             return None
 
-    def sync(self) -> Tuple[bool, str]:
+    def discover_sheet_tabs(self) -> List[Tuple[Optional[str], Optional[str]]]:
         """
-        구글 시트로부터 최신 용어집 동기화 수행
-        반환값: (성공 여부, 안내 메시지)
+        스프레드시트의 모든 탭(시트 이름 및 gid) 자동 탐색
+        반환값: [(sheet_name, gid), ...]
         """
-        if not self.csv_url:
-            return False, "구글 스프레드시트 URL(GLOSSARY_SHEET_URL)이 설정되지 않았습니다."
+        if not self.doc_id:
+            return []
 
-        csv_content = self.fetch_sheet_csv()
-        if not csv_content:
-            return False, "구글 시트 접근에 실패했습니다. 공유 권한(링크가 있는 모든 사용자에게 보기 허용)을 확인해 주세요."
+        tabs: Dict[str, Optional[str]] = {}
+
+        # 1. htmlview 웹페이지에서 탭 목록 검색 시도
+        html_url = f"https://docs.google.com/spreadsheets/d/{self.doc_id}/htmlview"
+        html_content = self.fetch_url_content(html_url)
+
+        if html_content:
+            # 패턴 A: <li id="sheet-button-12345"><a href="...gid=12345...">시트명</a>
+            matches = re.findall(r'gid=([0-9]+)[^>]*>([^<]+)</a>', html_content)
+            for gid, name in matches:
+                name_clean = name.strip()
+                if name_clean:
+                    tabs[name_clean] = gid
+
+            # 패턴 B: JSON 데이터 내의 탭 목록 감지
+            json_matches = re.findall(r'name["\']?\s*:\s*["\']([^"\']+)["\'][\s\S]*?sheetId["\']?\s*:\s*([0-9]+)', html_content)
+            for name, gid in json_matches:
+                name_clean = name.strip()
+                if name_clean and name_clean not in tabs:
+                    tabs[name_clean] = gid
+
+        # 2. 알려진 시트 목록(KNOWN_SHEET_NAMES) 병합 (누락 방지)
+        for name in KNOWN_SHEET_NAMES:
+            if name not in tabs:
+                tabs[name] = None
+
+        result = [(name, gid) for name, gid in tabs.items()]
+        logger.info(f"Discovered {len(result)} sheet tabs to sync.")
+        return result
+
+    def fetch_sheet_csv(self, name: Optional[str] = None, gid: Optional[str] = None) -> Optional[str]:
+        """특정 시트(탭)의 CSV 데이터 다운로드"""
+        if not self.doc_id:
+            return None
+
+        # 1. gid가 있으면 gid로 시도
+        if gid is not None:
+            url = f"https://docs.google.com/spreadsheets/d/{self.doc_id}/export?format=csv&gid={gid}"
+            content = self.fetch_url_content(url)
+            if content and "html" not in content.lower()[:100]:
+                return content
+
+        # 2. 시트 이름이 있으면 gviz/tq 엔드포인트로 시도
+        if name:
+            encoded_name = urllib.parse.quote(name)
+            url = f"https://docs.google.com/spreadsheets/d/{self.doc_id}/gviz/tq?tqx=out:csv&sheet={encoded_name}"
+            content = self.fetch_url_content(url)
+            if content and "html" not in content.lower()[:100]:
+                return content
+
+        return None
+
+    def parse_csv_rows(self, csv_content: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """개별 CSV 내용에서 (영문매핑, 베트남어매핑, 동의어매핑) 추출"""
+        parsed_en = []
+        parsed_vi = []
+        parsed_synonyms = []
 
         try:
             lines = csv_content.splitlines()
@@ -147,9 +190,9 @@ class GlossaryManager:
             all_rows = [row for row in reader if any(cell.strip() for cell in row)]
 
             if not all_rows:
-                return False, "스프레드시트에 내용이 없습니다."
+                return parsed_en, parsed_vi, parsed_synonyms
 
-            # 1. 헤더 컬럼 인덱스 자동 감지 (상위 5줄 내에서 검색)
+            # 헤더 컬럼 인덱스 자동 감지 (상위 5줄 내)
             header_idx = -1
             col_ko = -1
             col_en = -1
@@ -158,7 +201,6 @@ class GlossaryManager:
 
             for r_idx, row in enumerate(all_rows[:6]):
                 norm_row = [cell.strip().lower() for cell in row]
-                # 한국어/원문 컬럼 감지
                 for c_idx, val in enumerate(norm_row):
                     if any(k in val for k in ["한글", "한국어", "원문", "용어", "korean", "ko"]):
                         col_ko = c_idx
@@ -173,17 +215,11 @@ class GlossaryManager:
                     header_idx = r_idx
                     break
 
-            # 명시적 헤더를 찾지 못한 경우: 0열이 한글, 1열이 영문으로 기본 가정
+            # 명시적 헤더가 없는 경우: 0열 한글, 1열 영문 가정
             if col_ko == -1:
                 header_idx = 0
                 col_ko = 0
                 col_en = 1 if len(all_rows[0]) > 1 else -1
-
-            parsed_en: List[Tuple[str, str]] = []
-            parsed_vi: List[Tuple[str, str]] = []
-            parsed_direct_en: List[Tuple[str, str]] = []
-            parsed_direct_vi: List[Tuple[str, str]] = []
-            parsed_synonyms: List[Tuple[str, str]] = []
 
             data_rows = all_rows[header_idx + 1:] if header_idx != -1 else all_rows
             for row in data_rows:
@@ -194,13 +230,14 @@ class GlossaryManager:
                 if not ko_term:
                     continue
 
-                # 헤더명이 다시 나온 경우 스킵
-                if ko_term.lower() in ["한글", "한국어", "원문", "용어", "korean", "ko"]:
+                # 헤더 라벨 재출현 무시
+                if ko_term.lower() in ["한글", "한국어", "원문", "용어", "korean", "ko", "단어", "no", "번호"]:
                     continue
 
-                # 동의어 분리 (쉼표, 슬래시, 줄바꿈 등)
                 main_ko = ko_term
                 ko_synonyms = [main_ko]
+
+                # 동의어 분리 (쉼표, 슬래시, 줄바꿈 등)
                 if col_syn != -1 and len(row) > col_syn:
                     syn_text = row[col_syn].strip()
                     if syn_text:
@@ -209,7 +246,7 @@ class GlossaryManager:
                             if s_clean and s_clean not in ko_synonyms:
                                 ko_synonyms.append(s_clean)
 
-                # 한글 원문 자체에 괄호로 동의어가 포함된 경우 추출: 예) "약속의 목자(약목, 목자님)"
+                # 한글 원문 자체에 괄호로 동의어가 표기된 경우: 예) "약속의 목자(약목, 목자님)"
                 paren_match = re.search(r'\((.*?)\)', ko_term)
                 if paren_match:
                     extracted_main = re.sub(r'\(.*?\)', '', ko_term).strip()
@@ -241,43 +278,83 @@ class GlossaryManager:
                         for s_term in ko_synonyms:
                             parsed_vi.append((s_term, vi_term))
 
-            # 중복 제거 및 긴 단어 우선 정렬 (Greedy length matching: 부분 일치 방지)
-            def deduplicate_and_sort(terms: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
-                seen = set()
-                unique_terms = []
-                for src, tgt in terms:
-                    key = (src.lower(), tgt.lower())
-                    if key not in seen and src and tgt:
-                        seen.add(key)
-                        unique_terms.append((src, tgt))
-                # 긴 원문 단어부터 매칭되도록 역순 정렬
-                return sorted(unique_terms, key=lambda x: len(x[0]), reverse=True)
-
-            self.terms["en"] = deduplicate_and_sort(parsed_en)
-            self.terms["vi"] = deduplicate_and_sort(parsed_vi)
-            self.direct_replacements["en"] = deduplicate_and_sort(parsed_direct_en)
-            self.direct_replacements["vi"] = deduplicate_and_sort(parsed_direct_vi)
-            self.synonym_to_main = deduplicate_and_sort(parsed_synonyms)
-
-            import time
-            self.last_sync_time = time.time()
-            self.loaded_count = len(self.terms["en"]) + len(self.terms["vi"])
-
-            self.save_to_cache()
-
-
-            msg = (
-                f"✅ **용어집 동기화 완료**\n\n"
-                f"• 영문 공식 용어: {len(self.terms['en'])}개\n"
-                f"• 베트남어 공식 용어: {len(self.terms['vi'])}개\n"
-                f"• 총 등록 단어 수: {self.loaded_count}개"
-            )
-            logger.info(f"Glossary synced successfully. Total terms: {self.loaded_count}")
-            return True, msg
-
         except Exception as e:
-            logger.error(f"Error parsing glossary CSV: {e}", exc_info=True)
-            return False, f"용어집 파싱 중 오류가 발생했습니다: {type(e).__name__}"
+            logger.debug(f"Row parse error in sheet: {e}")
+
+        return parsed_en, parsed_vi, parsed_synonyms
+
+    def sync(self) -> Tuple[bool, str]:
+        """
+        스프레드시트 내의 '모든 시트(탭)'를 탐색하고 다운로드하여 일괄 동기화
+        반환값: (성공 여부, 안내 메시지)
+        """
+        if not self.doc_id:
+            return False, "구글 스프레드시트 URL(GLOSSARY_SHEET_URL)이 올바르지 않습니다."
+
+        tabs = self.discover_sheet_tabs()
+        if not tabs:
+            # 탭을 못 찾은 경우 기본 첫 번째 시트라도 시도
+            tabs = [(None, "0")]
+
+        all_parsed_en: List[Tuple[str, str]] = []
+        all_parsed_vi: List[Tuple[str, str]] = []
+        all_parsed_synonyms: List[Tuple[str, str]] = []
+        successful_sheets = []
+
+        # 각 시트별로 CSV 다운로드 및 파싱
+        for sheet_name, gid in tabs:
+            display_name = sheet_name or f"시트(gid={gid})"
+            csv_content = self.fetch_sheet_csv(name=sheet_name, gid=gid)
+            if not csv_content:
+                continue
+
+            en_list, vi_list, syn_list = self.parse_csv_rows(csv_content)
+            if en_list or vi_list:
+                all_parsed_en.extend(en_list)
+                all_parsed_vi.extend(vi_list)
+                all_parsed_synonyms.extend(syn_list)
+                successful_sheets.append(display_name)
+                logger.info(f"Sheet [{display_name}] synced: {len(en_list)} EN, {len(vi_list)} VI terms.")
+
+        if not all_parsed_en and not all_parsed_vi:
+            return False, "스프레드시트의 시트들에서 유효한 용어 데이터를 가져오지 못했습니다. 공유 권한(링크가 있는 모든 사용자 보기 허용)을 확인해 주세요."
+
+        # 중복 제거 및 긴 단어 우선 정렬 (Greedy length matching)
+        def deduplicate_and_sort(terms: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+            seen = set()
+            unique_terms = []
+            for src, tgt in terms:
+                key = (src.lower(), tgt.lower())
+                if key not in seen and src and tgt:
+                    seen.add(key)
+                    unique_terms.append((src, tgt))
+            return sorted(unique_terms, key=lambda x: len(x[0]), reverse=True)
+
+        self.terms["en"] = deduplicate_and_sort(all_parsed_en)
+        self.terms["vi"] = deduplicate_and_sort(all_parsed_vi)
+        self.synonym_to_main = deduplicate_and_sort(all_parsed_synonyms)
+
+        import time
+        self.last_sync_time = time.time()
+        self.loaded_count = len(self.terms["en"]) + len(self.terms["vi"])
+        self.loaded_sheet_count = len(successful_sheets)
+
+        self.save_to_cache()
+
+        sheet_preview = ", ".join(successful_sheets[:4])
+        if len(successful_sheets) > 4:
+            sheet_preview += f" 외 {len(successful_sheets) - 4}개"
+
+        msg = (
+            f"✅ **전체 시트 용어집 동기화 완료**\n\n"
+            f"• 반영된 시트 수: **{self.loaded_sheet_count}개 시트** ({sheet_preview})\n"
+            f"• 영문 공식 용어: **{len(self.terms['en'])}개**\n"
+            f"• 베트남어 공식 용어: **{len(self.terms['vi'])}개**\n"
+            f"• 등록된 동의어: **{len(self.synonym_to_main)}개**\n"
+            f"• 총 반영 단어 수: **{self.loaded_count}개**"
+        )
+        logger.info(f"All sheets synced. Total terms: {self.loaded_count} from {self.loaded_sheet_count} sheets.")
+        return True, msg
 
     def preprocess_source(self, text: str) -> str:
         """
@@ -289,10 +366,8 @@ class GlossaryManager:
             return text
 
         result = text
-        # 대표 한글 단어로의 동의어 치환
         for syn, main_term in self.synonym_to_main:
             if syn in result and syn != main_term:
-                # 단어 치환
                 result = result.replace(syn, main_term)
 
         return result
@@ -307,7 +382,6 @@ class GlossaryManager:
         후처리 중심 용어집 치환:
         1. 원문(source_text)에 용어집의 한글 단어가 포함되어 있는 경우
         2. 번역 결과물(translated_text)에서 대소문자 표기 및 공식 단어로 정밀 교정
-        3. 직접 치환 목록(오역 패턴)이 정의되어 있으면 강제 보정
         """
         if not translated_text:
             return translated_text
@@ -319,7 +393,6 @@ class GlossaryManager:
         result = translated_text
         source_lower = source_text.lower() if source_text else ""
 
-        # 1. 원문(source_text) 기반 매핑 및 공식 표기 교정
         for src_ko, target_term in self.terms[target_lang]:
             if not src_ko or not target_term:
                 continue
@@ -341,18 +414,7 @@ class GlossaryManager:
             # 대소문자가 다르거나 철자가 살짝 다른 경우 공식 지정어로 교정 (예: promised pastor -> Promised Pastor)
             result = re.sub(pattern, target_term, result, flags=re.IGNORECASE)
 
-        # 2. 직접 치환 목록(direct_replacements) 적용 (번역기 오역 패턴 교정)
-        if target_lang in self.direct_replacements:
-            for wrong_term, correct_term in self.direct_replacements[target_lang]:
-                escaped_wrong = re.escape(wrong_term)
-                if target_lang == "en":
-                    pattern = rf'\b{escaped_wrong}\b'
-                else:
-                    pattern = rf'{escaped_wrong}'
-                result = re.sub(pattern, correct_term, result, flags=re.IGNORECASE)
-
         return result
-
 
     def get_status_summary(self) -> str:
         """상태 안내용 요약 문자열 반환"""
@@ -360,4 +422,5 @@ class GlossaryManager:
             return "미등록 (또는 동기화 대기 중)"
         en_count = len(self.terms.get("en", []))
         vi_count = len(self.terms.get("vi", []))
-        return f"🟢 정상 작동 중 (영문 {en_count}개 / 베트남어 {vi_count}개)"
+        sheet_info = f"{self.loaded_sheet_count}개 시트" if self.loaded_sheet_count > 0 else ""
+        return f"🟢 정상 작동 중 ({sheet_info} / 영문 {en_count}개 / 베트남어 {vi_count}개)"
