@@ -42,6 +42,7 @@ from translator import (
     determine_translation_plan,
     is_trivial_reaction,
 )
+from glossary import GlossaryManager
 
 # S8: 로그 마스킹 및 최소 로깅 설정
 logging.basicConfig(
@@ -58,12 +59,18 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "").strip()
 # S4: 추측 불가능한 비밀 입장 payload
 INVITE_PAYLOAD = os.getenv("INVITE_PAYLOAD", "").strip()
+# 구글 스프레드시트 용어집 URL
+GLOSSARY_SHEET_URL = os.getenv("GLOSSARY_SHEET_URL", "").strip()
 
 # S4: 원자적 SQLite 데이터베이스 초기화
 db.init_db()
 
-# 번역 서비스 인스턴스
-translation_service = UnifiedTranslationService(DEEPL_API_KEY)
+# 용어집 관리자 인스턴스 초기화
+glossary_manager = GlossaryManager(GLOSSARY_SHEET_URL)
+
+# 번역 서비스 인스턴스 (용어집 후처리 연동)
+translation_service = UnifiedTranslationService(DEEPL_API_KEY, glossary_manager=glossary_manager)
+
 
 # --- 중복 번역 방지 캐시 (LRU / TTL) ---
 # 1. 메시지 원본 텍스트 캐시: (chat_id, message_id) -> text
@@ -605,6 +612,24 @@ async def cmd_revoke_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(message, f"오류 발생: {e}")
 
 
+async def cmd_sync_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """총괄 관리자 전용: 구글 스프레드시트 용어집 최신화 (1:1 DM 및 관리자 명령)"""
+    user = update.effective_user
+    message = update.effective_message
+    if not message or not is_admin(user.id):
+        return
+
+    wait_msg = await safe_reply(message, "⏳ 구글 스프레드시트에서 최신 용어집을 동기화하는 중입니다...")
+    success, msg = await asyncio.to_thread(glossary_manager.sync)
+    if wait_msg:
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+    await send_command_feedback(update, context, msg, parse_mode="Markdown")
+
+
+
 async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """방 안에서 직접 승인하는 현장 명령어 (총괄 관리자 및 현장 방장/관리자 가능)"""
     chat = update.effective_chat
@@ -879,6 +904,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{topic_info}"
         f"• 번역 기능: {'✅ 켜짐(ON)' if enabled else '❌ 꺼짐(OFF)'}\n"
         f"• 언어 모드: `{mode}`\n"
+        f"• 용어집 연동: {glossary_manager.get_status_summary()}\n"
         f"• 엔진: `{translation_service.get_engine_name()}`\n"
     )
     await send_command_feedback(update, context, status_text, parse_mode="Markdown")
@@ -902,12 +928,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private" and is_admin(user.id):
         admin_extra = (
             "\n👑 **총괄 관리자 전용 (1:1 DM)**:\n"
+            "• `/sync_glossary` (또는 `용어집 갱신`): 구글 시트 용어집 즉시 동기화\n"
             "• `/groups` : 연결된 대화방 목록 조회 및 원격 승인/퇴장\n"
             "• `/approve_group [ID]` : 대화방 원격 승인\n"
             "• `/ban_group [ID]` : 대화방 원격 차단/퇴장\n"
             "• `/grant_admin [ID]` : 보조 관리자 권한 부여\n"
             "• `/revoke_admin [ID]` : 관리자 권한 회수\n"
         )
+
 
     text = (
         "📖 **사용 안내**\n\n"
@@ -1001,6 +1029,11 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
             context.args = cmd_args
             await cmd_start(update, context)
             return True
+    elif cmd_name in ["sync_glossary", "syncglossary", "용어집", "용어집갱신", "용어집동기화"]:
+        if is_admin(update.effective_user.id):
+            await cmd_sync_glossary(update, context)
+            return True
+
 
     # 그 외 슬래시(/)로 시작하는 미인식 명령어는 일반 번역을 하지 않고 무시
     if has_slash:
@@ -1206,6 +1239,30 @@ def start_health_check_server(port: int):
         logger.warning(f"Health server error: {type(e).__name__}")
 
 
+async def periodic_glossary_sync():
+    """백그라운드에서 1시간마다 최신 용어집 자동 갱신"""
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            if GLOSSARY_SHEET_URL:
+                logger.info("Running scheduled glossary sync...")
+                await asyncio.to_thread(glossary_manager.sync)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Periodic glossary sync error: {e}")
+
+
+async def post_init(application):
+    """봇 기동 직후 초기 용어집 동기화 및 주기적 갱신 태스크 등록"""
+    if GLOSSARY_SHEET_URL:
+        logger.info("Initializing glossary sync on bot startup...")
+        # 초기 1회 비동기 동기화
+        asyncio.create_task(asyncio.to_thread(glossary_manager.sync))
+        # 1시간 주기적 동기화 백그라운드 태스크 실행
+        asyncio.create_task(periodic_glossary_sync())
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN missing.")
@@ -1215,7 +1272,7 @@ def main():
     start_health_check_server(port)
 
     logger.info("Starting Telegram Bot application...")
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # 핸들러 등록
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1227,6 +1284,7 @@ def main():
     app.add_handler(CommandHandler("ban_group", cmd_ban_group))
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))
     app.add_handler(CommandHandler("revoke_admin", cmd_revoke_admin))
+    app.add_handler(CommandHandler("sync_glossary", cmd_sync_glossary))
     app.add_handler(CommandHandler("allow_group", cmd_allow_group))
     app.add_handler(CommandHandler("topic", cmd_topic))
     app.add_handler(CommandHandler("lang", cmd_lang))
@@ -1245,3 +1303,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

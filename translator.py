@@ -280,8 +280,9 @@ def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
 
 class UnifiedTranslationService:
     """통합 번역 서비스"""
-    def __init__(self, deepl_api_key: str = ""):
+    def __init__(self, deepl_api_key: str = "", glossary_manager=None):
         self.deepl_api_key = deepl_api_key.strip() if deepl_api_key else ""
+        self.glossary_manager = glossary_manager
         self._deepl_translator: Optional[deepl.Translator] = None
 
         if self.deepl_api_key:
@@ -292,9 +293,10 @@ class UnifiedTranslationService:
                 logger.warning(f"External API init failed: {type(e).__name__}")
 
     def get_engine_name(self) -> str:
-        if self._deepl_translator:
-            return "Primary API + GTX Engine"
-        return "GTX Translation Engine"
+        base = "Primary API + GTX Engine" if self._deepl_translator else "GTX Translation Engine"
+        if self.glossary_manager and self.glossary_manager.loaded_count > 0:
+            return f"{base} + 용어집({self.glossary_manager.loaded_count}개 적용)"
+        return base
 
     def _translate_free(self, text: str, target_lang: str) -> Optional[str]:
         gtx_res = translate_google_gtx(text, target_lang)
@@ -312,16 +314,39 @@ class UnifiedTranslationService:
         return None
 
     def translate(self, text: str, target_lang: str) -> Optional[str]:
-        if target_lang == "vi":
-            return self._translate_free(text, "vi")
+        # 1. 용어집 전처리 (원문의 동의어/약어를 대표 표준 한글 용어로 정규화)
+        source_to_translate = text
+        if self.glossary_manager:
+            try:
+                source_to_translate = self.glossary_manager.preprocess_source(text)
+            except Exception as e:
+                logger.warning(f"Glossary pre-processing error: {e}")
 
-        if self._deepl_translator and target_lang in ["en", "ko"]:
+        raw_result = None
+        if target_lang == "vi":
+            raw_result = self._translate_free(source_to_translate, "vi")
+        elif self._deepl_translator and target_lang in ["en", "ko"]:
             deepl_target = "EN-US" if target_lang == "en" else "KO"
             try:
-                result = self._deepl_translator.translate_text(text, target_lang=deepl_target)
-                return result.text
+                result = self._deepl_translator.translate_text(source_to_translate, target_lang=deepl_target)
+                raw_result = result.text
             except Exception as e:
                 logger.warning(f"Primary API error ({type(e).__name__}) -> Fallback to GTX")
-                return self._translate_free(text, target_lang)
+                raw_result = self._translate_free(source_to_translate, target_lang)
+        else:
+            raw_result = self._translate_free(source_to_translate, target_lang)
 
-        return self._translate_free(text, target_lang)
+        # 2. 용어집 후처리 치환 적용 (원문 및 타겟 언어 기준 공식 용어 보정)
+        if raw_result and self.glossary_manager:
+            try:
+                raw_result = self.glossary_manager.apply_glossary(
+                    translated_text=raw_result,
+                    target_lang=target_lang,
+                    source_text=source_to_translate
+                )
+            except Exception as e:
+                logger.warning(f"Glossary post-processing error: {e}")
+
+        return raw_result
+
+
