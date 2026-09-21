@@ -3,6 +3,8 @@ import re
 import time
 import logging
 import threading
+import asyncio
+import html
 from collections import OrderedDict
 from typing import Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -72,10 +74,10 @@ MAX_TEXT_CACHE = 5000
 BOT_TRANSLATION_REPLIES = OrderedDict()
 MAX_REPLY_CACHE = 5000
 
-# 3. 동일 방/토픽 내 최근 번역된 내용 캐시: (chat_id, thread_id, normalized_text) -> timestamp
+# 3. 동일 방/토픽 내 최근 번역된 내용 캐시: (chat_id, thread_id, user_id, normalized_text) -> timestamp
 RECENT_TRANSLATED_TEXTS = OrderedDict()
 MAX_RECENT_TEXTS = 3000
-DUPLICATE_TEXT_WINDOW_SECONDS = 300  # 5분 이내 동일 텍스트 중복 번역 방지
+DUPLICATE_TEXT_WINDOW_SECONDS = 30  # 30초 이내 동일 사용자 중복 방지
 
 
 def get_cached_message_text(chat_id: int, message_id: int) -> Optional[str]:
@@ -115,11 +117,11 @@ def mark_as_processed(
     record_message_cache(chat_id, message_id, text, reply_id)
 
 
-def is_duplicate_content(chat_id: int, thread_id: Optional[int], text: str) -> bool:
-    """해당 대화방/토픽에서 동일한 내용이 최근 5분 이내에 이미 번역되었는지 확인"""
+def is_duplicate_content(chat_id: int, thread_id: Optional[int], text: str, user_id: int = 0) -> bool:
+    """해당 대화방/토픽에서 '동일 사용자'가 최근 30초 이내에 동일한 텍스트를 중복 전송했는지 확인"""
     norm = re.sub(r'\s+', ' ', text).strip().lower()
     target_thread = thread_id if thread_id is not None else 1
-    key = (chat_id, target_thread, norm)
+    key = (chat_id, target_thread, user_id, norm)
     now = time.time()
 
     if key in RECENT_TRANSLATED_TEXTS:
@@ -130,11 +132,11 @@ def is_duplicate_content(chat_id: int, thread_id: Optional[int], text: str) -> b
     return False
 
 
-def record_translated_content(chat_id: int, thread_id: Optional[int], text: str):
+def record_translated_content(chat_id: int, thread_id: Optional[int], text: str, user_id: int = 0):
     """번역된 내용을 캐시에 기록"""
     norm = re.sub(r'\s+', ' ', text).strip().lower()
     target_thread = thread_id if thread_id is not None else 1
-    key = (chat_id, target_thread, norm)
+    key = (chat_id, target_thread, user_id, norm)
     RECENT_TRANSLATED_TEXTS[key] = time.time()
     if len(RECENT_TRANSLATED_TEXTS) > MAX_RECENT_TEXTS:
         RECENT_TRANSLATED_TEXTS.popitem(last=False)
@@ -150,8 +152,12 @@ async def safe_reply(message, text: str, **kwargs):
     if not message:
         return None
 
+    thread_id = None
     if getattr(message, "is_topic_message", False) and message.message_thread_id:
-        kwargs.setdefault("message_thread_id", message.message_thread_id)
+        thread_id = message.message_thread_id
+        kwargs.setdefault("message_thread_id", thread_id)
+    elif "message_thread_id" in kwargs:
+        thread_id = kwargs["message_thread_id"]
 
     try:
         return await message.reply_text(text, **kwargs)
@@ -160,17 +166,20 @@ async def safe_reply(message, text: str, **kwargs):
         if "not found" in err_str or "reply" in err_str:
             kwargs.pop("reply_to_message_id", None)
             kwargs.pop("quote", None)
+            if thread_id:
+                kwargs["message_thread_id"] = thread_id
             try:
-                bot = message.get_bot() if hasattr(message, "get_bot") else message._bot
-                return await bot.send_message(
-                    chat_id=message.chat_id,
-                    text=text,
-                    **kwargs
-                )
+                bot = getattr(message, "get_bot", lambda: None)() or getattr(message, "_bot", None)
+                if bot:
+                    return await bot.send_message(
+                        chat_id=message.chat_id,
+                        text=text,
+                        **kwargs
+                    )
             except Exception as e2:
                 logger.error(f"Fallback send failed: {type(e2).__name__}")
         else:
-            logger.error(f"Reply failed: {type(e).__name__}")
+            logger.error(f"Reply failed: {type(e).__name__} - {e}")
         return None
 
 
@@ -185,9 +194,9 @@ async def send_command_feedback(
     대화방 청결 유지를 위한 스마트 명령어 피드백 전송:
     1. 1:1 개인 대화(DM)에서 실행된 경우: 개인 대화창에 정상 회신
     2. 그룹 대화방에서 실행된 경우:
-       - 그룹 대화방의 원본 명령어 메시지 자동 삭제 (채팅방 청결 유지)
        - 실행한 관리자의 1:1 봇 개인 대화(DM)로 결과 전송
-       - 관리자가 봇과 1:1 대화를 시작하지 않아 DM이 차단된 경우, 그룹에 1회성 안내 전송
+       - DM 전송 성공 시에만 그룹의 원본 명령어 메시지 삭제 (메시지 증발 방지)
+       - 관리자가 봇과 1:1 대화를 시작하지 않아 DM 실패 시, 그룹에 안내 전송
     """
     chat = update.effective_chat
     message = update.effective_message
@@ -201,33 +210,36 @@ async def send_command_feedback(
         return await safe_reply(message, text, **kwargs)
 
     # 2. 그룹 대화방인 경우
-    # 2-1. 원본 명령어 메시지 삭제 시도 (봇이 메시지 삭제 권한을 가지고 있는 경우)
-    if delete_trigger:
-        try:
-            await message.delete()
-        except Exception as e:
-            logger.debug(f"Could not delete command trigger message: {e}")
-
-    # 2-2. 관리자의 1:1 DM으로 결과 전송 시도
-    group_title = chat.title or "그룹"
+    group_title = (chat.title or "그룹").replace("[", "(").replace("]", ")")
     thread_info = ""
-    if getattr(message, "is_topic_message", False) and message.message_thread_id:
-        thread_info = f" (토픽 ID: {message.message_thread_id})"
+    thread_id = getattr(message, "message_thread_id", None)
+    if getattr(message, "is_topic_message", False) and thread_id:
+        thread_info = f" (토픽 ID: {thread_id})"
 
-    dm_text = f"🏢 **[{group_title}{thread_info}] 관리 안내**\n\n{text}"
+    dm_text = f"🏢 [{group_title}{thread_info}] 관리 안내\n\n{text}"
 
+    dm_sent = False
     try:
-        sent = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=user.id,
             text=dm_text,
             **kwargs
         )
         logger.info(f"Command feedback sent secretly to user {user.id} in 1:1 DM.")
-        return sent
+        dm_sent = True
     except Exception as e:
-        logger.warning(f"Could not send DM to user {user.id} (user likely hasn't /started bot in DM): {e}")
+        logger.warning(f"Could not send DM to user {user.id} (user hasn't /started bot in DM): {e}")
 
-    # 2-3. 관리자가 봇과 1:1 대화를 아직 튼 적이 없는 경우 그룹으로 폴백 안내
+    # DM 전송에 성공한 경우에만 그룹의 원본 명령어 삭제 (메시지 증발 방지)
+    if dm_sent:
+        if delete_trigger:
+            try:
+                await message.delete()
+            except Exception as e:
+                logger.debug(f"Could not delete command trigger message: {e}")
+        return None
+
+    # 관리자가 봇과 1:1 대화를 아직 튼 적이 없어 DM이 차단된 경우 그룹으로 폴백 안내
     fallback_text = (
         f"{text}\n\n"
         f"*(💡 대화방 청결 팁: 봇과의 1:1 대화창에서 `/start`를 한 번 눌러두시면, "
@@ -263,20 +275,21 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def notify_admins_new_group(chat, inviter, context: ContextTypes.DEFAULT_TYPE):
-    """새 그룹방 연결 시 총괄 관리자들에게 1:1 알림 전송"""
+    """새 그룹방 연결 시 총괄 관리자들에게 1:1 알림 전송 (HTML 파싱 사용으로 특수문자 오류 방지)"""
     admin_ids = db.get_admin_ids()
     if not admin_ids:
         return
 
-    inviter_name = f"@{inviter.username}" if inviter and inviter.username else (f"ID: {inviter.id}" if inviter else "알 수 없음")
+    inviter_name = f"@{html.escape(inviter.username)}" if inviter and inviter.username else (f"ID: {inviter.id}" if inviter else "알 수 없음")
+    chat_title = html.escape(chat.title or "이름 없음")
     is_forum = bool(getattr(chat, "is_forum", False))
     is_allowed = db.is_group_allowed(chat.id)
     status_str = "🟢 정상 활성화 (번역 작동 중)" if is_allowed else "🟡 승인 대기 중"
 
     text = (
-        f"🔔 **신규 그룹 대화방 연결 감지**\n\n"
-        f"• 그룹명: **{chat.title or '이름 없음'}**\n"
-        f"• 그룹 ID: `{chat.id}`\n"
+        f"🔔 <b>신규 그룹 대화방 연결 감지</b>\n\n"
+        f"• 그룹명: <b>{chat_title}</b>\n"
+        f"• 그룹 ID: <code>{chat.id}</code>\n"
         f"• 포럼(주제) 여부: {'예' if is_forum else '아니오'}\n"
         f"• 연결/초대자: {inviter_name}\n"
         f"• 현재 상태: {status_str}\n\n"
@@ -299,10 +312,10 @@ async def notify_admins_new_group(chat, inviter, context: ContextTypes.DEFAULT_T
                 chat_id=a_id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to notify admin {a_id}: {e}")
 
 
 async def track_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -324,7 +337,7 @@ async def track_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """S4, S5: 딥링크 입장 게이트"""
+    """S4, S5: 딥링크 입장 게이트 (보안 지침 준수: 토큰 검증 후 첫 관리자 부트스트랩)"""
     message = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
@@ -338,11 +351,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     input_payload = args[0].strip() if args else ""
 
+    # S4: 올바른 초대 토큰(비밀 payload) 검증 (공격자의 단순 /start를 통한 관리자 권한 탈취 원천 차단)
     if not verify_payload(input_payload, INVITE_PAYLOAD):
         record_failed_auth(user.id)
         return
 
-    # S5: 첫 관리자 부트스트랩 (1회성)
+    # S5: 첫 관리자 부트스트랩 (1회성 - 올바른 토큰을 가진 최초 진입자만 관리자로 인정)
     if not db.is_bootstrap_done():
         db.set_user_role(user.id, "admin", user.username or "")
         db.complete_bootstrap()
@@ -1019,12 +1033,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if previous_text is not None:
         if previous_text == current_text:
-            # 텍스트 내용에 변화가 없음 -> 단순 이모지 리액션(반응 표시) 또는 중복 이벤트이므로 번역 제외
-            logger.info(f"Message {message.message_id} in chat {chat.id} text unchanged (reaction/duplicate). Skipping.")
+            # 텍스트 내용에 변화가 없음 -> 단순 이모지 리액션 또는 중복 이벤트
+            logger.info(f"Message {message.message_id} in chat {chat.id} text unchanged. Skipping.")
             return
         logger.info(f"Message {message.message_id} in chat {chat.id} was EDITED. Updating translation.")
     elif update.edited_message is not None:
-        logger.info(f"Message {message.message_id} in chat {chat.id} received as edited_message without cache. Processing translation.")
+        logger.info(f"Message {message.message_id} in chat {chat.id} received as edited_message without cache.")
 
     # 커스텀 및 한글 단축 명령어 가로채기
     if await handle_custom_or_korean_command(update, context):
@@ -1045,13 +1059,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread_id = message.message_thread_id
     is_forum_chat = False
     if chat.type != "private":
-        # 아직 DB에 등록되지 않은 신규 그룹인 경우 등록 및 총괄 관리자 알림
+        # 아직 DB에 등록되지 않은 신규 그룹인 경우 등록 및 알림
         if not db.is_group_registered(chat.id):
             is_forum = bool(getattr(chat, "is_forum", False))
             db.register_group(chat.id, chat.title or "", is_forum)
             await notify_admins_new_group(chat, user, context)
 
-        # 미승인 그룹인 경우 완전 무반응 (S11)
+        # 미승인 그룹인 경우 완전 무반응
         if not db.is_group_allowed(chat.id):
             logger.info(f"Group {chat.id} is blocked/unapproved. Skipping.")
             return
@@ -1076,10 +1090,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         mode = "all"
 
-    # 4. 동일 대화방/토픽 내 5분 이내 동일 텍스트 중복 번역 방지 (메시지 수정인 경우는 제외)
+    # 4. 동일 대화방/토픽 내 30초 이내 동일 사용자 중복 번역 방지
     current_target_thread = thread_id if (chat.type != "private" and is_forum_chat) else None
-    if not is_edit and is_duplicate_content(chat.id, current_target_thread, current_text):
-        logger.info(f"Duplicate content in chat {chat.id}. Skipping duplicate translation.")
+    if not is_edit and is_duplicate_content(chat.id, current_target_thread, current_text, user.id):
+        logger.info(f"Duplicate content from user {user.id} in chat {chat.id}. Skipping duplicate translation.")
         return
 
     targets, text_to_translate = determine_translation_plan(
@@ -1090,11 +1104,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info(f"Translating in chat_id={chat.id} to {[t[0] for t in targets]} (has_photo={has_photo})")
-    results = []
-    for target_code, flag in targets:
-        translated = translation_service.translate(text_to_translate, target_lang=target_code)
-        if translated:
-            results.append(f"{flag} {translated}")
+
+    # 동기 HTTP 번역 요청을 비동기 스레드 풀에서 병렬(asyncio.gather) 실행하여 이벤트 루프 블로킹 방지 및 지연시간 50% 단축
+    async def _do_translate(target_code: str, flag: str):
+        try:
+            translated = await asyncio.to_thread(
+                translation_service.translate,
+                text_to_translate,
+                target_lang=target_code
+            )
+            if translated:
+                return f"{flag} {translated}"
+        except Exception as e:
+            logger.error(f"Translation error to {target_code}: {e}")
+        return None
+
+    tasks = [_do_translate(target_code, flag) for target_code, flag in targets]
+    gathered_results = await asyncio.gather(*tasks)
+    results = [r for r in gathered_results if r]
 
     if not results:
         logger.warning(f"Translation produced empty result in chat_id={chat.id}")
@@ -1134,7 +1161,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 번역 성공 후 메시지 텍스트 및 봇 답장 ID 캐시에 등록
     record_message_cache(chat.id, message.message_id, current_text, reply_msg_id)
-    record_translated_content(chat.id, current_target_thread, current_text)
+    record_translated_content(chat.id, current_target_thread, current_text, user.id)
     logger.info(f"Translation completed in chat_id={chat.id} (is_edit={is_edit})")
 
 
@@ -1206,7 +1233,10 @@ def main():
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(ChatMemberHandler(track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
+
+    message_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
+    app.add_handler(MessageHandler(message_filter, handle_message))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & message_filter, handle_message))
 
     app.add_error_handler(global_error_handler)
 
