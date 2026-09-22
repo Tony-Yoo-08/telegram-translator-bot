@@ -98,6 +98,7 @@ def init_db():
                     INSERT INTO system_flags (key, value)
                     VALUES ('admin_initialized', 'true')
                     ON CONFLICT(key) DO UPDATE SET value = 'true'
+                """)
             except ValueError:
                 pass
 
