@@ -161,5 +161,19 @@ class TestBilingualAndImageQuoteTranslation(unittest.TestCase):
         self.assertEqual(targets, [("ko", "🇰🇷")])
 
 
+class TestMaintenanceMode(unittest.TestCase):
+    def test_maintenance_flag(self):
+        import db
+        db.init_db()
+        initial_state = db.is_maintenance_mode()
+        try:
+            db.set_maintenance_mode(True)
+            self.assertTrue(db.is_maintenance_mode())
+            db.set_maintenance_mode(False)
+            self.assertFalse(db.is_maintenance_mode())
+        finally:
+            db.set_maintenance_mode(initial_state)
+
+
 if __name__ == "__main__":
     unittest.main()

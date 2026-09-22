@@ -101,6 +101,40 @@ def complete_bootstrap():
         conn.commit()
 
 
+def is_maintenance_mode() -> bool:
+    """시스템 전체 번역 일괄 중단(점검 모드) 여부 확인"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM system_flags WHERE key = 'maintenance_mode'")
+        row = cursor.fetchone()
+        return bool(row and row["value"] == "true")
+
+
+def set_maintenance_mode(enabled: bool):
+    """시스템 전체 번역 일괄 중단(점검 모드) 설정"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO system_flags (key, value)
+            VALUES ('maintenance_mode', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, ('true' if enabled else 'false',))
+        conn.commit()
+
+
+def get_allowed_groups() -> List[Dict[str, Any]]:
+    """승인된 활성 그룹 목록 조회 (브로드캐스트용)"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT chat_id, title, is_forum
+            FROM groups 
+            WHERE is_allowed = 1
+            ORDER BY created_at DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def get_user_role(user_id: int) -> Optional[str]:
     with get_connection() as conn:
         cursor = conn.cursor()

@@ -6,7 +6,7 @@ import threading
 import asyncio
 import html
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from dotenv import load_dotenv
@@ -611,6 +611,157 @@ async def cmd_revoke_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await safe_reply(message, f"오류 발생: {e}")
 
+PAUSE_NOTICE_TEXT = (
+    "⚠️ **[시스템 점검 안내 / Maintenance Notice]**\n\n"
+    "더 원활하고 안정적인 번역 서비스를 위해 시스템 점검을 진행 중입니다.\n"
+    "점검 기간 동안 번역 기능이 잠시 중단되오니 양해 부탁드립니다.\n"
+    "작업 완료 후 즉시 재안내 드리겠습니다.\n\n"
+    "• Translation is temporarily paused for system maintenance.\n"
+    "• Dịch thuật tạm thời bị tạm dừng để bảo trì hệ thống."
+)
+
+RESUME_NOTICE_TEXT = (
+    "✅ **[시스템 정상화 안내 / Service Resumed]**\n\n"
+    "번역 시스템 점검이 완료되었습니다.\n"
+    "지금부터 모든 대화방에서 정상적으로 번역 기능을 이용하실 수 있습니다.\n"
+    "기다려 주셔서 감사합니다.\n\n"
+    "• System maintenance is complete. Translation service is now restored.\n"
+    "• Quá trình bảo trì hệ thống đã hoàn tất. Dịch vụ dịch thuật đã được khôi phục."
+)
+
+
+async def broadcast_maintenance_notice(context: ContextTypes.DEFAULT_TYPE, text: str) -> Tuple[int, int]:
+    """
+    승인된 모든 그룹 대화방에 시스템 공지 발송 (포럼 방의 경우 메인/일반 토픽에만 1회 발송)
+    반환값: (성공 건수, 실패 건수)
+    """
+    groups = db.get_allowed_groups()
+    success_count = 0
+    fail_count = 0
+
+    for g in groups:
+        chat_id = g["chat_id"]
+        is_forum = bool(g.get("is_forum", False))
+
+        try:
+            if is_forum:
+                # 포럼 방의 경우 메인/일반(General) 토픽(ID: 1)으로 전송하여 서브 토픽 도배 방지
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        message_thread_id=1,
+                        parse_mode="Markdown"
+                    )
+                except Exception as forum_e:
+                    logger.debug(f"Forum thread_id 1 failed for chat {chat_id}: {forum_e}, falling back to default thread.")
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="Markdown"
+                    )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="Markdown"
+                )
+            success_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to send maintenance notice to chat {chat_id}: {e}")
+            fail_count += 1
+
+        # 텔레그램 발송 제한(Rate limit) 준수
+        await asyncio.sleep(0.05)
+
+    return success_count, fail_count
+
+
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """총괄 관리자 전용: 전체 번역 일괄 중단 (점검 모드)"""
+    user = update.effective_user
+    message = update.effective_message
+    if not message or not is_admin(user.id):
+        return
+
+    args = context.args or []
+    text_arg = " ".join(args).lower()
+    is_silent = "silent" in text_arg or "조용" in text_arg
+
+    db.set_maintenance_mode(True)
+    logger.info(f"System maintenance mode ENABLED by admin {user.id} (silent={is_silent})")
+
+    if not is_silent:
+        wait_msg = await safe_reply(message, "⏳ 전체 대화방에 시스템 점검 공지를 발송하는 중입니다...")
+        succ, fail = await broadcast_maintenance_notice(context, PAUSE_NOTICE_TEXT)
+        if wait_msg:
+            try:
+                await wait_msg.delete()
+            except Exception:
+                pass
+        await send_command_feedback(
+            update,
+            context,
+            f"🚨 **전체 번역 일괄 중단(점검 모드) 가동 완료**\n\n"
+            f"• 현재 상태: **🔴 점검 중 (번역 전면 중단)**\n"
+            f"• 공지 발송 결과: 성공 {succ}개 방 / 실패 {fail}개 방\n\n"
+            f"💡 점검이 끝난 후 `/resume` (또는 `점검완료`)를 입력하면 정상화 공지와 함께 번역이 재개됩니다.",
+            parse_mode="Markdown"
+        )
+    else:
+        await send_command_feedback(
+            update,
+            context,
+            f"🚨 **전체 번역 일괄 중단(조용한 점검 모드) 가동 완료**\n\n"
+            f"• 현재 상태: **🔴 점검 중 (번역 전면 중단)**\n"
+            f"• 공지 발송: **생략됨 (silent)**\n\n"
+            f"💡 점검이 끝난 후 `/resume` (또는 `점검완료`)를 입력하면 번역이 재개됩니다.",
+            parse_mode="Markdown"
+        )
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """총괄 관리자 전용: 전체 번역 일괄 재개 (정상화)"""
+    user = update.effective_user
+    message = update.effective_message
+    if not message or not is_admin(user.id):
+        return
+
+    args = context.args or []
+    text_arg = " ".join(args).lower()
+    is_silent = "silent" in text_arg or "조용" in text_arg
+
+    db.set_maintenance_mode(False)
+    logger.info(f"System maintenance mode DISABLED by admin {user.id} (silent={is_silent})")
+
+    if not is_silent:
+        wait_msg = await safe_reply(message, "⏳ 전체 대화방에 시스템 정상화 공지를 발송하는 중입니다...")
+        succ, fail = await broadcast_maintenance_notice(context, RESUME_NOTICE_TEXT)
+        if wait_msg:
+            try:
+                await wait_msg.delete()
+            except Exception:
+                pass
+        await send_command_feedback(
+            update,
+            context,
+            f"✅ **전체 번역 정상화(점검 종료) 완료**\n\n"
+            f"• 현재 상태: **🟢 정상 운영 중 (번역 활성)**\n"
+            f"• 공지 발송 결과: 성공 {succ}개 방 / 실패 {fail}개 방\n\n"
+            f"이제 모든 연결된 대화방에서 정상 번역이 작동합니다.",
+            parse_mode="Markdown"
+        )
+    else:
+        await send_command_feedback(
+            update,
+            context,
+            f"✅ **전체 번역 정상화(조용한 재개) 완료**\n\n"
+            f"• 현재 상태: **🟢 정상 운영 중 (번역 활성)**\n"
+            f"• 공지 발송: **생략됨 (silent)**\n\n"
+            f"이제 모든 연결된 대화방에서 정상 번역이 작동합니다.",
+            parse_mode="Markdown"
+        )
+
 
 async def cmd_sync_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """총괄 관리자 전용: 구글 스프레드시트 용어집 최신화 (1:1 DM 및 관리자 명령)"""
@@ -896,8 +1047,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• 현재 주제(ID: {target_thread}): {'🟢 켜짐(ON)' if active else '⚪ 꺼짐(대기)'}\n"
         )
 
+    maint_mode = db.is_maintenance_mode()
+    maint_status = "🔴 점검 중 (번역 일괄 중단 상태)" if maint_mode else "🟢 정상 운영 중"
+
     status_text = (
         "📊 **현재 상태**\n\n"
+        f"• 시스템 상태: **{maint_status}**\n"
         f"• 사용자 권한: {'총괄 관리자' if is_admin(user.id) else '일반 사용자'}\n"
         f"• 대화방 유형: {'그룹 대화방' if is_group else '개인 1:1 대화'}\n"
         f"• 대화방 승인: {'✅ 승인됨' if group_auth else '🔒 미승인'}\n"
@@ -927,7 +1082,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_extra = ""
     if chat.type == "private" and is_admin(user.id):
         admin_extra = (
-            "\n👑 **총괄 관리자 전용 (1:1 DM)**:\n"
+            "\n👑 **총괄 관리자 전용 (1:1 DM 및 관리자 명령)**:\n"
+            "• `/pause` (또는 `점검시작`) : 전체 번역 일괄 중단 + 모든 방에 점검 공지 발송\n"
+            "• `/pause silent` (또는 `조용히정지`) : 공지 없이 조용히 번역 일괄 중단\n"
+            "• `/resume` (또는 `점검완료`) : 전체 번역 일괄 정상화 + 모든 방에 완료 공지 발송\n"
+            "• `/resume silent` (또는 `조용히재개`) : 공지 없이 조용히 번역 일괄 정상화\n"
             "• `/sync_glossary` (또는 `용어집 갱신`): 구글 시트 용어집 즉시 동기화\n"
             "• `/groups` : 연결된 대화방 목록 조회 및 원격 승인/퇴장\n"
             "• `/approve_group [ID]` : 대화방 원격 승인\n"
@@ -1033,6 +1192,16 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
         if is_admin(update.effective_user.id):
             await cmd_sync_glossary(update, context)
             return True
+    elif cmd_name in ["pause", "점검시작", "일괄정지", "점검", "정지"]:
+        if is_admin(update.effective_user.id):
+            context.args = cmd_args
+            await cmd_pause(update, context)
+            return True
+    elif cmd_name in ["resume", "점검완료", "점검종료", "일괄재개", "재개"]:
+        if is_admin(update.effective_user.id):
+            context.args = cmd_args
+            await cmd_resume(update, context)
+            return True
 
 
     # 그 외 슬래시(/)로 시작하는 미인식 명령어는 일반 번역을 하지 않고 무시
@@ -1076,6 +1245,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 커스텀 및 한글 단축 명령어 가로채기
     if await handle_custom_or_korean_command(update, context):
         record_message_cache(chat.id, message.message_id, current_text)
+        return
+
+    # 2-1. 시스템 점검(일괄 정지) 모드 확인
+    # 관리자 명령어를 제외한 모든 일반 대화의 번역을 전면 차단합니다.
+    if db.is_maintenance_mode():
+        logger.info(f"System maintenance mode is ACTIVE. Skipping translation in chat {chat.id}.")
         return
 
     # 3. 봇의 번역 답장에 대한 단순 인용/반응 필터링
@@ -1284,6 +1459,8 @@ def main():
     app.add_handler(CommandHandler("ban_group", cmd_ban_group))
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))
     app.add_handler(CommandHandler("revoke_admin", cmd_revoke_admin))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("sync_glossary", cmd_sync_glossary))
     app.add_handler(CommandHandler("allow_group", cmd_allow_group))
     app.add_handler(CommandHandler("topic", cmd_topic))
