@@ -175,5 +175,25 @@ class TestMaintenanceMode(unittest.TestCase):
             db.set_maintenance_mode(initial_state)
 
 
+class TestGroupLangSettings(unittest.TestCase):
+    def test_parse_group_lang_map(self):
+        import db
+        import os
+        orig = os.environ.get("GROUP_LANG_MAP")
+        try:
+            os.environ["GROUP_LANG_MAP"] = '{"-100123456": "ko-en", "-100987654": "ko-vi"}'
+            db.GROUP_LANG_MAP_RAW = os.environ["GROUP_LANG_MAP"]
+            res = db.parse_group_lang_map()
+            self.assertEqual(res.get(-100123456), "ko-en")
+            self.assertEqual(res.get(-100987654), "ko-vi")
+        finally:
+            if orig is not None:
+                os.environ["GROUP_LANG_MAP"] = orig
+                db.GROUP_LANG_MAP_RAW = orig
+            else:
+                os.environ.pop("GROUP_LANG_MAP", None)
+                db.GROUP_LANG_MAP_RAW = ""
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,32 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent / "auth_store.db"
 EMERGENCY_ADMIN_ID = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
 AUTO_APPROVE_GROUPS = os.getenv("AUTO_APPROVE_GROUPS", "true").lower() in ["true", "1", "yes"]
+GROUP_LANG_MAP_RAW = os.getenv("GROUP_LANG_MAP", "").strip()
+
+
+def parse_group_lang_map() -> Dict[int, str]:
+    """환경변수 GROUP_LANG_MAP 파싱 (JSON 또는 쉼표 구분 문자열 지원)"""
+    if not GROUP_LANG_MAP_RAW:
+        return {}
+    res = {}
+    try:
+        import json
+        data = json.loads(GROUP_LANG_MAP_RAW)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                res[int(k)] = str(v).strip().lower()
+            return res
+    except Exception:
+        pass
+
+    try:
+        for item in GROUP_LANG_MAP_RAW.split(","):
+            if ":" in item:
+                k, v = item.split(":", 1)
+                res[int(k.strip())] = v.strip().lower()
+    except Exception as e:
+        logger.warning(f"Failed to parse GROUP_LANG_MAP: {e}")
+    return res
 
 
 def get_connection() -> sqlite3.Connection:
@@ -72,9 +98,17 @@ def init_db():
                     INSERT INTO system_flags (key, value)
                     VALUES ('admin_initialized', 'true')
                     ON CONFLICT(key) DO UPDATE SET value = 'true'
-                """)
             except ValueError:
                 pass
+
+        # 환경변수 GROUP_LANG_MAP 영구 설정 동기화
+        env_map = parse_group_lang_map()
+        for c_id, l_mode in env_map.items():
+            cursor.execute("""
+                INSERT INTO groups (chat_id, lang_mode, is_allowed, topic_mode)
+                VALUES (?, ?, 1, 'all')
+                ON CONFLICT(chat_id) DO UPDATE SET lang_mode = excluded.lang_mode
+            """, (c_id, l_mode))
         conn.commit()
 
 
@@ -205,15 +239,17 @@ def is_group_allowed(chat_id: int) -> bool:
 
 
 def register_group(chat_id: int, title: str = "", is_forum: bool = False):
-    """신규 그룹 등록 (기본적으로 모든 토픽이 활성화되는 all 모드로 등록하여 배포 후 재설정 불필요)"""
+    """신규 그룹 등록 (GROUP_LANG_MAP 설정이 있는 경우 해당 언어 모드 적용, 없으면 all)"""
     default_allowed = 1 if AUTO_APPROVE_GROUPS else 0
+    env_map = parse_group_lang_map()
+    default_lang = env_map.get(chat_id, "all")
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO groups (chat_id, title, is_allowed, is_forum, topic_mode)
-            VALUES (?, ?, ?, ?, 'all')
+            INSERT INTO groups (chat_id, title, is_allowed, is_forum, lang_mode, topic_mode)
+            VALUES (?, ?, ?, ?, ?, 'all')
             ON CONFLICT(chat_id) DO UPDATE SET title = excluded.title, is_forum = excluded.is_forum
-        """, (chat_id, title, default_allowed, 1 if is_forum else 0))
+        """, (chat_id, title, default_allowed, 1 if is_forum else 0, default_lang))
         conn.commit()
 
 
@@ -250,6 +286,8 @@ def delete_group(chat_id: int):
 
 
 def get_group_config(chat_id: int) -> Dict[str, Any]:
+    env_map = parse_group_lang_map()
+    fallback_lang = env_map.get(chat_id, "all")
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -260,14 +298,14 @@ def get_group_config(chat_id: int) -> Dict[str, Any]:
         if row:
             return {
                 "is_allowed": bool(row["is_allowed"]),
-                "lang_mode": row["lang_mode"] or "all",
+                "lang_mode": row["lang_mode"] or fallback_lang,
                 "is_enabled": bool(row["is_enabled"]),
                 "is_forum": bool(row["is_forum"]),
                 "topic_mode": row["topic_mode"] or "all"
             }
         return {
             "is_allowed": AUTO_APPROVE_GROUPS,
-            "lang_mode": "all",
+            "lang_mode": fallback_lang,
             "is_enabled": True,
             "is_forum": False,
             "topic_mode": "all"

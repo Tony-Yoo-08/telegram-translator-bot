@@ -6,7 +6,7 @@ import threading
 import asyncio
 import html
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from dotenv import load_dotenv
@@ -85,6 +85,9 @@ MAX_REPLY_CACHE = 5000
 RECENT_TRANSLATED_TEXTS = OrderedDict()
 MAX_RECENT_TEXTS = 3000
 DUPLICATE_TEXT_WINDOW_SECONDS = 30  # 30초 이내 동일 사용자 중복 방지
+
+# 4. 활성화 시 대화형 언어 선택 대기 메시지 캐시: chat_id -> message_id (선택 완료 시 자동 삭제용)
+PENDING_LANG_PROMPTS: Dict[int, int] = {}
 
 
 def get_cached_message_text(chat_id: int, message_id: int) -> Optional[str]:
@@ -411,23 +414,75 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """관리자 인라인 버튼 클릭 처리 (멤버 승인 및 그룹 원격 승인/퇴장)"""
+    """인라인 버튼 클릭 처리 (대화방 언어 선택, 멤버 승인 및 그룹 원격 제어)"""
     query = update.callback_query
     await query.answer()
 
-    admin_user = update.effective_user
-    if not is_admin(admin_user.id):
-        return
-
+    user = update.effective_user
     data = query.data or ""
     if ":" not in data:
         return
 
-    action, target_id_str = data.split(":", 1)
-    target_id = int(target_id_str)
+    action = data.split(":", 1)[0]
 
-    # 1. 멤버 승인/거절
+    # 1. 대화방 현장 언어 선택 버튼 (방장/그룹 관리자 및 총괄 관리자 모두 허용)
+    if action == "room_lang":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+        chosen_mode = parts[2]
+
+        # 권한 확인: 총괄 관리자이거나 해당 방의 텔레그램 관리자인지 검사
+        if not is_admin(user.id):
+            try:
+                member = await context.bot.get_chat_member(target_chat_id, user.id)
+                if member.status not in ["creator", "administrator"]:
+                    await query.answer("대화방 관리자만 언어 모드를 설정할 수 있습니다.", show_alert=True)
+                    return
+            except Exception:
+                pass
+
+        mode_names = {
+            "ko-en": "🇺🇸 한-영 (English)",
+            "ko-vi": "🇻🇳 한-베 (Tiếng Việt)",
+            "all": "🌐 3개국어 전체 (All)"
+        }
+        mode_name = mode_names.get(chosen_mode, chosen_mode)
+
+        db.update_group_config(target_chat_id, lang_mode=chosen_mode)
+        PENDING_LANG_PROMPTS.pop(target_chat_id, None)
+
+        # 1. 안내 메시지 자동 삭제 (사용자 요청: 언어 설정 완료 시 안내 메시지 삭제)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # 2. 간결한 완료 메시지 전송 후 7초 뒤 자동 정리
+        try:
+            sent_notice = await context.bot.send_message(
+                chat_id=target_chat_id,
+                text=f"✅ 대화방 번역 모드가 **{mode_name}**으로 설정되었습니다. 이제 자유롭게 대화하시면 번역됩니다.",
+                parse_mode="Markdown"
+            )
+            if sent_notice:
+                async def _cleanup(msg):
+                    await asyncio.sleep(7)
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                asyncio.create_task(_cleanup(sent_notice))
+        except Exception:
+            pass
+        return
+
+    # 이하 총괄 관리자(Super Admin) 전용 명령들
+    if not is_admin(user.id):
+        return
+
+    # 2. 멤버 승인/거절
     if action == "approve":
+        target_id = int(data.split(":", 1)[1])
         db.set_user_role(target_id, "member")
         try:
             await query.edit_message_text(f"✅ 사용자(ID: {target_id}) 승인이 완료되었습니다.")
@@ -438,31 +493,26 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             pass
     elif action == "reject":
+        target_id = int(data.split(":", 1)[1])
         db.set_user_role(target_id, "rejected")
         try:
             await query.edit_message_text(f"❌ 사용자(ID: {target_id}) 입장을 거절했습니다.")
         except Exception:
             pass
 
-    # 2. 그룹 원격 승인 / 퇴장
+    # 3. 그룹 원격 승인 / 퇴장
     elif action == "allow_grp":
+        target_id = int(data.split(":", 1)[1])
         db.set_group_allowed(target_id, True)
-        conf = db.get_group_config(target_id)
         try:
             await query.edit_message_text(f"✅ 그룹 대화방(ID: `{target_id}`)이 정상 승인되었습니다.", parse_mode="Markdown")
-            if conf.get("is_forum", False):
-                guide = (
-                    "✅ **이 그룹 대화방이 총괄 관리자로부터 원격 승인되었습니다!**\n\n"
-                    "🛡️ **안전 모드 적용**: 도배 방지를 위해 기본적으로 모든 주제에서 번역이 꺼져 있습니다.\n"
-                    "👉 방장/관리자님은 번역이 필요한 주제(토픽)에 들어가서 **`/topic on`** 을 입력해 주세요!"
-                )
-            else:
-                guide = "✅ **이 그룹 대화방이 총괄 관리자로부터 원격 승인되었습니다.** 이제 번역이 동작합니다."
+            guide = "✅ **이 그룹 대화방이 총괄 관리자로부터 원격 승인되었습니다.** 이제 번역이 동작합니다."
             await context.bot.send_message(chat_id=target_id, text=guide, parse_mode="Markdown")
         except Exception:
             pass
 
     elif action == "ban_grp":
+        target_id = int(data.split(":", 1)[1])
         db.set_group_allowed(target_id, False)
         try:
             await query.edit_message_text(f"❌ 그룹 대화방(ID: `{target_id}`) 입장을 거절하고 퇴장했습니다.", parse_mode="Markdown")
@@ -470,6 +520,140 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             db.delete_group(target_id)
         except Exception:
             pass
+
+    # 4. 총괄 관리자 1:1 DM 그룹 원격 제어 패널 (sel_grp, adm_lang, adm_toggle, adm_back)
+    elif action == "sel_grp":
+        target_chat_id = int(data.split(":")[1])
+        conf = db.get_group_config(target_chat_id)
+        groups = db.get_all_groups()
+        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
+        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+
+        mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(conf.get("lang_mode"), conf.get("lang_mode", "all"))
+        switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
+
+        card_text = (
+            f"⚙️ **대화방 원격 설정: {title}**\n\n"
+            f"• 식별 ID: `{target_chat_id}`\n"
+            f"• 현재 언어 모드: **{mode_str}**\n"
+            f"• 번역 스위치: **{switch_str}**\n\n"
+            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
+        )
+        card_kb = [
+            [
+                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
+                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
+                InlineKeyboardButton("🌐 3개국어", callback_data=f"adm_lang:{target_chat_id}:all"),
+            ],
+            [
+                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
+                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
+            ]
+        ]
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+
+    elif action == "adm_lang":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+        new_mode = parts[2]
+        db.update_group_config(target_chat_id, lang_mode=new_mode)
+        mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(new_mode, new_mode)
+        await query.answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!", show_alert=True)
+
+        conf = db.get_group_config(target_chat_id)
+        groups = db.get_all_groups()
+        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
+        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+        switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
+
+        card_text = (
+            f"⚙️ **대화방 원격 설정: {title}**\n\n"
+            f"• 식별 ID: `{target_chat_id}`\n"
+            f"• 현재 언어 모드: **{mode_str}** (변경 완료 ✅)\n"
+            f"• 번역 스위치: **{switch_str}**\n\n"
+            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
+        )
+        card_kb = [
+            [
+                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
+                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
+                InlineKeyboardButton("🌐 3개국어", callback_data=f"adm_lang:{target_chat_id}:all"),
+            ],
+            [
+                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
+                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
+            ]
+        ]
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+
+    elif action == "adm_toggle":
+        target_chat_id = int(data.split(":")[1])
+        conf = db.get_group_config(target_chat_id)
+        new_state = not conf.get("is_enabled", True)
+        db.update_group_config(target_chat_id, is_enabled=new_state)
+        await query.answer(f"번역 스위치가 {'ON' if new_state else 'OFF'} 되었습니다.", show_alert=True)
+
+        groups = db.get_all_groups()
+        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
+        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+        mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(conf.get("lang_mode"), conf.get("lang_mode", "all"))
+        switch_str = "🟢 켜짐(ON)" if new_state else "⚪ 꺼짐(OFF)"
+
+        card_text = (
+            f"⚙️ **대화방 원격 설정: {title}**\n\n"
+            f"• 식별 ID: `{target_chat_id}`\n"
+            f"• 현재 언어 모드: **{mode_str}**\n"
+            f"• 번역 스위치: **{switch_str}** (변경 완료 ✅)\n\n"
+            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
+        )
+        card_kb = [
+            [
+                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
+                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
+                InlineKeyboardButton("🌐 3개국어", callback_data=f"adm_lang:{target_chat_id}:all"),
+            ],
+            [
+                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
+                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
+            ]
+        ]
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+
+    elif action == "adm_back":
+        text, reply_markup = build_groups_menu()
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+def build_groups_menu():
+    """총괄 관리자용 대화방 목록 및 인라인 버튼 메뉴 생성"""
+    groups = db.get_all_groups()
+    if not groups:
+        return "현재 봇이 연결된 그룹 대화방이 없습니다.", None
+
+    lines = ["📋 **봇 연결 그룹 대화방 목록 및 원격 제어**\n"]
+    keyboard = []
+    mode_names = {"ko-en": "🇺🇸한영", "ko-vi": "🇻🇳한베", "all": "🌐3개국어"}
+
+    for idx, g in enumerate(groups, 1):
+        status_icon = "🟢 승인됨" if g["is_allowed"] else "🟡 대기중"
+        forum_badge = " (포럼)" if g["is_forum"] else ""
+        m_name = mode_names.get(g["lang_mode"], g["lang_mode"])
+        sw_name = "ON" if g["is_enabled"] else "OFF"
+        lines.append(
+            f"**{idx}. {g['title'] or '이름 없음'}**{forum_badge}\n"
+            f"• ID: `{g['chat_id']}` | 상태: {status_icon}\n"
+            f"• 설정: 언어 **`{m_name}`** | 번역: **`{sw_name}`**\n"
+        )
+        title_btn = (g['title'] or f"방 {idx}")[:14]
+        keyboard.append([
+            InlineKeyboardButton(f"⚙️ {idx}. {title_btn} 설정", callback_data=f"sel_grp:{g['chat_id']}")
+        ])
+
+    lines.append(
+        "💡 **원격 관리**: 위 버튼을 누르면 해당 방의 언어(`한영/한베/3개국어`)와 번역 스위치를 즉시 변경할 수 있습니다.\n"
+        "• 명령어로 변경: `/set_lang [대화방ID] [all | ko-en | ko-vi]`"
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
 async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,32 +665,52 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or chat.type != "private" or not is_admin(user.id):
         return
 
-    groups = db.get_all_groups()
-    if not groups:
-        await safe_reply(message, "현재 봇이 연결된 그룹 대화방이 없습니다.")
+    text, reply_markup = build_groups_menu()
+    await safe_reply(message, text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def cmd_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """총괄 관리자 전용: 특정 대화방의 번역 언어 모드 원격 변경"""
+    user = update.effective_user
+    message = update.effective_message
+    if not message or not is_admin(user.id):
         return
 
-    lines = ["📋 **봇 연결 그룹 대화방 목록**\n"]
-    for idx, g in enumerate(groups, 1):
-        status_icon = "🟢 승인됨" if g["is_allowed"] else "🟡 대기중(미승인)"
-        forum_badge = " (주제별 포럼)" if g["is_forum"] else ""
-        topic_mode_str = ""
-        if g.get("is_forum"):
-            t_mode = g.get("topic_mode", "selective")
-            topic_mode_str = f" | 토픽모드: {'선택주제만' if t_mode == 'selective' else '전체주제'}"
-        lines.append(
-            f"**{idx}. {g['title'] or '이름 없음'}**{forum_badge}\n"
-            f"• ID: `{g['chat_id']}` | 상태: {status_icon}\n"
-            f"• 언어모드: `{g['lang_mode']}` | 번역스위치: {'ON' if g['is_enabled'] else 'OFF'}{topic_mode_str}\n"
+    args = context.args or []
+    if len(args) < 2:
+        await safe_reply(
+            message,
+            "사용법: `/set_lang [대화방ID] [all | ko-en | ko-vi]`\n"
+            "예시: `/set_lang -100123456789 ko-en`\n\n"
+            "• `all` : 3개국어 (한국어 ↔ 영어 ↔ 베트남어)\n"
+            "• `ko-en` : 한-영 전용 (한국어 ↔ 영어)\n"
+            "• `ko-vi` : 한-베 전용 (한국어 ↔ 베트남어)",
+            parse_mode="Markdown"
         )
+        return
 
-    lines.append(
-        "🛠️ **원격 관리 명령**:\n"
-        "• `/approve_group [ID]` : 원격 승인\n"
-        "• `/ban_group [ID]` : 원격 차단 및 봇 자동 퇴장"
-    )
+    try:
+        target_chat_id = int(args[0].strip())
+        raw_mode = args[1].strip().lower()
+        mode_map = {
+            "all": "all", "전체": "all", "3개국어": "all",
+            "ko-en": "ko-en", "koen": "ko-en", "한영": "ko-en", "영어": "ko-en",
+            "ko-vi": "ko-vi", "kovi": "ko-vi", "한베": "ko-vi", "베트남": "ko-vi", "베트남어": "ko-vi"
+        }
+        if raw_mode not in mode_map:
+            await safe_reply(message, "지원 언어 모드: `all` (3개국어), `ko-en` (한-영), `ko-vi` (한-베)")
+            return
 
-    await safe_reply(message, "\n".join(lines), parse_mode="Markdown")
+        target_mode = mode_map[raw_mode]
+        db.update_group_config(target_chat_id, lang_mode=target_mode)
+        mode_names = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}
+        await safe_reply(
+            message,
+            f"✅ 대화방(`{target_chat_id}`)의 언어 모드가 **{mode_names.get(target_mode)} (`{target_mode}`)**으로 원격 변경되었습니다.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await safe_reply(message, f"오류 발생: {e}")
 
 
 async def cmd_approve_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -797,21 +1001,41 @@ async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_forum = bool(getattr(chat, "is_forum", False))
     db.set_group_allowed(chat.id, True, chat.title or "", is_forum=is_forum)
 
-    guide = "✅ **이 대화방의 번역 기능이 정상 활성화되었습니다.**"
+    topic_guide = ""
     if is_forum:
         thread_id = message.message_thread_id
         if thread_id is None and getattr(message, "is_topic_message", False):
             thread_id = 1
         target_thread = thread_id if thread_id is not None else 1
         db.enable_topic(chat.id, target_thread)
+        topic_guide = f"• **현재 주제(토픽 ID: {target_thread})** 번역이 즉시 켜졌습니다.\n\n"
 
-        guide += (
-            "\n\n🔔 **현재 주제(토픽)의 실시간 자동 번역이 즉시 켜졌습니다!**\n\n"
-            "• 다른 주제에서도 번역을 켜시려면 해당 토픽에서 `토픽 on` (또는 `/topic on`)을 입력해 주세요.\n"
-            "• 모든 주제에서 동시에 번역을 켜시려면 `토픽 all` (또는 `/topic all`)을 입력해 주세요."
-        )
+    keyboard = [
+        [
+            InlineKeyboardButton("🇺🇸 한-영 (ko-en)", callback_data=f"room_lang:{chat.id}:ko-en"),
+            InlineKeyboardButton("🇻🇳 한-베 (ko-vi)", callback_data=f"room_lang:{chat.id}:ko-vi"),
+        ],
+        [
+            InlineKeyboardButton("🌐 3개국어 전체 (all)", callback_data=f"room_lang:{chat.id}:all"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await send_command_feedback(update, context, guide, parse_mode="Markdown")
+    guide = (
+        "🎉 **이 대화방의 번역 기능이 활성화되었습니다!**\n\n"
+        f"{topic_guide}"
+        "어떤 번역 유형으로 사용하시겠습니까?\n"
+        "아래 버튼을 눌러 **기본 언어 모드**를 선택해 주세요:\n\n"
+        "• `🇺🇸 한-영` : 한국어 ↔ 영어 전용 번역\n"
+        "• `🇻🇳 한-베` : 한국어 ↔ 베트남어 전용 번역\n"
+        "• `🌐 3개국어` : 한국어 ↔ 영어 ↔ 베트남어 전체 번역\n\n"
+        "*(채팅창 명령어로도 설정 가능: `/lang ko-en`, `/lang ko-vi`, `/lang all`)*\n\n"
+        "💡 **언어 선택이 완료되면 이 안내 메시지는 깔끔하게 자동 삭제됩니다.**"
+    )
+
+    prompt_msg = await send_command_feedback(update, context, guide, reply_markup=reply_markup, parse_mode="Markdown")
+    if prompt_msg:
+        PENDING_LANG_PROMPTS[chat.id] = prompt_msg.message_id
 
 
 async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -937,6 +1161,14 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != "private":
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, lang_mode=new_mode)
+
+    # 대기 중인 언어 선택 안내 메시지가 있다면 자동 삭제 (사용자 요청 반영)
+    if chat.id in PENDING_LANG_PROMPTS:
+        old_prompt_id = PENDING_LANG_PROMPTS.pop(chat.id)
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=old_prompt_id)
+        except Exception:
+            pass
 
     if new_mode == "all":
         desc = (
@@ -1088,7 +1320,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/resume` (또는 `점검완료`) : 전체 번역 일괄 정상화 + 모든 방에 완료 공지 발송\n"
             "• `/resume silent` (또는 `조용히재개`) : 공지 없이 조용히 번역 일괄 정상화\n"
             "• `/sync_glossary` (또는 `용어집 갱신`): 구글 시트 용어집 즉시 동기화\n"
-            "• `/groups` : 연결된 대화방 목록 조회 및 원격 승인/퇴장\n"
+            "• `/groups` : 연결된 대화방 목록 조회 및 원클릭 버튼 원격 설정\n"
+            "• `/set_lang [ID] [모드]` : 대화방 언어 모드 원격 지정 (all, ko-en, ko-vi)\n"
             "• `/approve_group [ID]` : 대화방 원격 승인\n"
             "• `/ban_group [ID]` : 대화방 원격 차단/퇴장\n"
             "• `/grant_admin [ID]` : 보조 관리자 권한 부여\n"
@@ -1202,6 +1435,18 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
             context.args = cmd_args
             await cmd_resume(update, context)
             return True
+    elif cmd_name in ["groups", "대화방", "그룹목록", "방목록", "대화방목록"]:
+        if is_admin(update.effective_user.id):
+            await cmd_groups(update, context)
+            return True
+    elif cmd_name in ["set_lang", "setlang", "방언어", "방언어설정", "언어설정"]:
+        if is_admin(update.effective_user.id):
+            context.args = cmd_args
+            await cmd_set_lang(update, context)
+            return True
+    elif cmd_name in ["allow_group", "allowgroup", "방승인", "그룹승인", "활성화"]:
+        await cmd_allow_group(update, context)
+        return True
 
 
     # 그 외 슬래시(/)로 시작하는 미인식 명령어는 일반 번역을 하지 않고 무시
@@ -1461,6 +1706,7 @@ def main():
     app.add_handler(CommandHandler("revoke_admin", cmd_revoke_admin))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("set_lang", cmd_set_lang))
     app.add_handler(CommandHandler("sync_glossary", cmd_sync_glossary))
     app.add_handler(CommandHandler("allow_group", cmd_allow_group))
     app.add_handler(CommandHandler("topic", cmd_topic))
