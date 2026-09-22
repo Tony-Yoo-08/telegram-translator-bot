@@ -294,7 +294,7 @@ class UnifiedTranslationService:
 
     def get_engine_name(self) -> str:
         base = "Primary API + GTX Engine" if self._deepl_translator else "GTX Translation Engine"
-        if self.glossary_manager and self.glossary_manager.loaded_count > 0:
+        if self.glossary_manager and self.glossary_manager.is_enabled() and self.glossary_manager.loaded_count > 0:
             return f"{base} + 용어집({self.glossary_manager.loaded_count}개 적용)"
         return base
 
@@ -314,9 +314,9 @@ class UnifiedTranslationService:
         return None
 
     def translate(self, text: str, target_lang: str) -> Optional[str]:
-        # 1. 용어집 전처리 (원문의 동의어/약어를 대표 표준 한글 용어로 정규화)
+        # 1. 용어집 전처리 (활성화되어 있는 경우에만 호출)
         source_to_translate = text
-        if self.glossary_manager:
+        if self.glossary_manager and self.glossary_manager.is_enabled():
             try:
                 source_to_translate = self.glossary_manager.preprocess_source(text)
             except Exception as e:
@@ -336,8 +336,8 @@ class UnifiedTranslationService:
         else:
             raw_result = self._translate_free(source_to_translate, target_lang)
 
-        # 2. 용어집 후처리 치환 적용 (원문 및 타겟 언어 기준 공식 용어 보정)
-        if raw_result and self.glossary_manager:
+        # 2. 용어집 후처리 치환 적용 (활성화되어 있는 경우에만 보정)
+        if raw_result and self.glossary_manager and self.glossary_manager.is_enabled():
             try:
                 raw_result = self.glossary_manager.apply_glossary(
                     translated_text=raw_result,

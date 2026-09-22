@@ -62,9 +62,13 @@ class GlossaryManager:
         # 초기 로컬 캐시 로드
         self.load_from_cache()
 
+    def is_enabled(self) -> bool:
+        """용어집 활성화 여부 확인"""
+        return bool(self.raw_sheet_url and self.doc_id)
+
     def load_from_cache(self) -> bool:
-        """로컬 파일에서 캐시된 용어집 로드"""
-        if not CACHE_FILE.exists():
+        """로컬 파일에서 캐시된 용어집 로드 (URL이 설정되어 있을 때만 로드)"""
+        if not self.is_enabled() or not CACHE_FILE.exists():
             return False
 
         try:
@@ -359,18 +363,10 @@ class GlossaryManager:
     def preprocess_source(self, text: str) -> str:
         """
         번역 전 전처리:
-        원문에 동의어/약어(예: '약목', '목자님')가 포함되어 있으면
-        번역기가 혼동하지 않도록 시트의 대표 표준 한글 용어로 통일
+        원문 단순 replace는 번역 엔진의 문맥 파악 및 조사를 파괴하므로
+        비활성화 상태에서는 원문을 100% 그대로 반환하여 보존합니다.
         """
-        if not text:
-            return text
-
-        result = text
-        for syn, main_term in self.synonym_to_main:
-            if syn in result and syn != main_term:
-                result = result.replace(syn, main_term)
-
-        return result
+        return text
 
     def apply_glossary(
         self,
@@ -380,10 +376,9 @@ class GlossaryManager:
     ) -> str:
         """
         후처리 중심 용어집 치환:
-        1. 원문(source_text)에 용어집의 한글 단어가 포함되어 있는 경우
-        2. 번역 결과물(translated_text)에서 대소문자 표기 및 공식 단어로 정밀 교정
+        비활성화 상태이거나 로드된 용어가 없으면 번역 결과물을 그대로 반환합니다.
         """
-        if not translated_text:
+        if not translated_text or not self.is_enabled() or self.loaded_count == 0:
             return translated_text
 
         target_lang = target_lang.lower()
@@ -411,13 +406,15 @@ class GlossaryManager:
             if target_term in result:
                 continue
 
-            # 대소문자가 다르거나 철자가 살짝 다른 경우 공식 지정어로 교정 (예: promised pastor -> Promised Pastor)
+            # 대소문자가 다르거나 철자가 살짝 다른 경우 공식 지정어로 교정
             result = re.sub(pattern, target_term, result, flags=re.IGNORECASE)
 
         return result
 
     def get_status_summary(self) -> str:
         """상태 안내용 요약 문자열 반환"""
+        if not self.is_enabled():
+            return "⚪ 비활성화됨 (롤백 상태 - 기본 번역 엔진 순수 작동 중)"
         if self.loaded_count == 0:
             return "미등록 (또는 동기화 대기 중)"
         en_count = len(self.terms.get("en", []))
