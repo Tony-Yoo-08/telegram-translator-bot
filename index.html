@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- 외부 검색엔진 인덱싱 및 노출 100% 원천 차단 -->
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+  <meta name="googlebot" content="noindex, nofollow">
+  
+  <title>해외선교 총괄 관제 포털 | 12지파 지경판 & 바돌로매 인재현황</title>
+
+  <!-- Google Fonts: Inter & Pretendard CDN -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+
+  <!-- Leaflet Vector Map CSS (워터마크 없는 글로벌 맵) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+
+  <!-- 커스텀 디자인 시스템 (다크/라이트 듀얼 테마 지원) -->
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+  <div class="app-container">
+    <!-- ==========================================================================
+         상단 메인 헤더 & 네비게이션
+         ========================================================================== -->
+    <header class="main-header">
+      <div class="brand-section">
+        <div class="brand-badge">
+          <span class="brand-icon">💎</span>
+          <span>BARTHOLOMEW</span>
+        </div>
+        <div>
+          <div class="brand-title">
+            <span>해외선교 총괄 관제 포털</span>
+            <span style="font-size: 0.7rem; background: rgba(16, 185, 129, 0.2); color: #10b981; padding: 2px 6px; border-radius: 4px; font-weight: 800;">LIVE</span>
+          </div>
+        </div>
+        <div class="brand-subtitle">
+          중앙 부장 · 총무 · 서무
+        </div>
+      </div>
+
+      <!-- 메인 탭 전환 (해외지경판, 인재현황판, 총괄·개발자 관제 3대 독립 분리) -->
+      <nav class="nav-tabs">
+        <button class="nav-tab-btn active" id="tabMapBtn">
+          <span class="nav-tab-icon">🗺️</span> <span>12지파 해외지경판</span>
+          <span class="badge-count" id="statTotalTerritoriesBadge">-</span>
+        </button>
+        <button class="nav-tab-btn" id="tabTalentsBtn">
+          <span class="nav-tab-icon">👥</span> <span>바돌로매 인재 현황판</span>
+          <span class="badge-count" id="statTalentsBadge">-</span>
+        </button>
+        <button class="nav-tab-btn" id="tabAdminBtn">
+          <span class="nav-tab-icon">🛡️</span> <span>총괄·개발자 관제</span>
+          <span class="badge-count badge-admin-logs" id="statAdminLogsBadge">0</span>
+        </button>
+      </nav>
+
+      <!-- 사용자 세션 & 모드 전환 & 액션 -->
+      <div class="header-actions">
+        <!-- 테마 전환 버튼 (다크 모드 / 라이트 모드) -->
+        <button class="theme-toggle-btn" id="themeToggleBtn" title="다크모드 / 라이트모드 전환">
+          <span class="theme-icon">☀️</span>
+          <span class="theme-text">라이트 모드</span>
+        </button>
+
+        <!-- 실시간 클라우드 동기화 뱃지 -->
+        <div class="header-cloud-badge" id="cloudSyncStatusBadge" title="Supabase 실시간 클라우드 DB 연동 상태" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 9999px; font-size: 0.74rem; font-weight: 600; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
+          <span id="cloudSyncDot" style="display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 6px #10b981;"></span>
+          <span id="cloudSyncStatusText">실시간 동기화</span>
+        </div>
+
+        <!-- 접속 계정 뱃지 -->
+        <div class="header-user-badge-wrap" id="currentUserBadgeWrap" title="현재 인증된 세션 계정">
+          <span class="user-status-dot"></span>
+          <span class="user-badge-text" id="currentUserBadge">인증 대기중</span>
+        </div>
+
+        <!-- 탭 연동 등록 액션 버튼 -->
+        <button class="btn-primary header-action-btn" id="headerPrimaryActionBtn">
+          <span>＋</span> <span id="headerPrimaryActionText">신규 지경 등록</span>
+        </button>
+
+        <!-- 로그아웃 버튼 -->
+        <button class="btn-secondary header-logout-btn" id="logoutBtn" title="로그아웃">
+          <span>🔒</span> <span>로그아웃</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ==========================================================================
+         [KPI 섹션 1] 12지파 해외지경판 전용 KPI (12지파별 지경 보유 개수 상세 표기)
+         ========================================================================== -->
+    <section class="territory-kpi-container" id="territoryKpiSection">
+      <!-- 상단 총계 요약 -->
+      <div class="kpi-top-summary">
+        <div class="kpi-main-stat">
+          <span class="kpi-title">🌐 12지파 해외 지경 총계:</span>
+          <div class="kpi-main-number-wrap">
+            <span class="kpi-main-number" id="kpiTotalTerritoriesCount">-</span>
+            <span class="kpi-unit">개 도시·주 거점</span>
+          </div>
+        </div>
+
+        <div class="kpi-sub-stats">
+          <div class="kpi-sub-pill kpi-church" title="교회 등급 (성도 300명 이상)">
+            <span class="dot"></span>
+            <span>교회 (300명+)</span>
+            <strong id="kpiChurchesCount">-</strong>
+          </div>
+          <div class="kpi-sub-pill kpi-branch" title="지역 등급 (성도 50명 이상)">
+            <span class="dot"></span>
+            <span>지역 (50명+)</span>
+            <strong id="kpiBranchesCount">-</strong>
+          </div>
+          <div class="kpi-sub-pill kpi-pioneer" title="개척지 등급 (신규 확장/0명)">
+            <span class="dot"></span>
+            <span>개척지 (0명)</span>
+            <strong id="kpiPioneersCount">-</strong>
+          </div>
+        </div>
+      </div>
+
+      <!-- 12지파별 지경 보유 개수 현황 카드 그리드 (클릭하여 해당 지파 필터링 가능) -->
+      <div class="tribes-kpi-grid" id="tribesKpiGrid">
+        <!-- JS로 동적 생성: 12지파별 개수 및 등급 요약 -->
+      </div>
+    </section>
+
+    <!-- ==========================================================================
+         [KPI 섹션 2] 바돌로매 인재 현황판 전용 KPI (인재 탭 활성화 시에만 노출)
+         ========================================================================== -->
+    <section class="talent-kpi-container" id="talentKpiSection" style="display: none;">
+      <div class="talent-kpi-grid">
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">바돌로매 총 언어 인재</span>
+            <span class="stat-value" id="kpiTalentTotal" style="color: var(--primary);">-</span>
+          </div>
+          <div class="stat-icon-wrap stat-icon-talent">👥</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">즉시 파견 가능</span>
+            <span class="stat-value" id="kpiTalentReady" style="color: #10b981;">-</span>
+          </div>
+          <div class="stat-icon-wrap stat-icon-church">🟢</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">현지 파견중</span>
+            <span class="stat-value" id="kpiTalentDispatched" style="color: #38bdf8;">-</span>
+          </div>
+          <div class="stat-icon-wrap stat-icon-pioneer">🔵</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">사역 연수중</span>
+            <span class="stat-value" id="kpiTalentTraining" style="color: #fbbf24;">-</span>
+          </div>
+          <div class="stat-icon-wrap stat-icon-branch">🟡</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">국내 사역 (언어 지원)</span>
+            <span class="stat-value" id="kpiTalentStandby" style="color: var(--text-muted);">-</span>
+          </div>
+          <div class="stat-icon-wrap" style="background: rgba(148, 163, 184, 0.15); color: #94a3b8;">⚪</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================================================
+         [KPI 섹션 3] 총괄·개발자 관제 전용 KPI (관리자 탭 활성화 시에만 노출)
+         ========================================================================== -->
+    <section class="admin-kpi-container" id="adminKpiSection" style="display: none;">
+      <div class="talent-kpi-grid">
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">등록 관리자 계정</span>
+            <span class="stat-value" id="kpiAdminAccountsCount" style="color: var(--primary);">5명</span>
+          </div>
+          <div class="stat-icon-wrap" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">👥</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">누적 시스템 이용 이력</span>
+            <span class="stat-value" id="kpiAdminTotalLogsCount" style="color: #38bdf8;">0건</span>
+          </div>
+          <div class="stat-icon-wrap" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">📜</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">현재 등록 해외 지경</span>
+            <span class="stat-value" id="kpiAdminTerritoriesCount" style="color: #fbbf24;">28개</span>
+          </div>
+          <div class="stat-icon-wrap" style="background: rgba(251, 191, 36, 0.15); color: #fbbf24;">🌐</div>
+        </div>
+
+        <div class="stat-item">
+          <div class="stat-info-left">
+            <span class="stat-label">시스템 보안 및 접속 상태</span>
+            <span class="stat-value" style="color: #10b981; font-size: 1.12rem; font-weight: 800;">정상 (보안 암호화)</span>
+          </div>
+          <div class="stat-icon-wrap" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">🛡️</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================================================
+         [뷰 1] 12지파 해외지경판 (Map View)
+         ========================================================================== -->
+    <main class="map-view-container" id="mapViewSection">
+      <!-- 12지파 필터 바 -->
+      <div class="tribe-filter-bar" id="tribeFilterBar">
+        <!-- JS로 동적 생성 -->
+      </div>
+
+      <!-- 지도 보조 필터 (등급 필터 & 가데이터 관리 & 도시/국가 검색창) -->
+      <div class="sub-filter-bar">
+        <div class="sub-filter-group">
+          <div class="category-chip-group">
+            <button class="cat-btn active" data-cat="ALL">전체 보기</button>
+            <button class="cat-btn cat-church" data-cat="CHURCH">교회 (300+)</button>
+            <button class="cat-btn cat-branch" data-cat="BRANCH">지역 (50+)</button>
+            <button class="cat-btn cat-pioneer" data-cat="PIONEER">개척지 (0)</button>
+          </div>
+
+          <!-- 지경 영역 라인·채색 토글 버튼 -->
+          <button type="button" class="cat-btn btn-boundary-toggle active" id="toggleBoundaryBtn" title="도시별 지파 고유 색상 라인 및 영역 채색을 켜거나 끕니다">
+            <span>🎨</span> 지경 채색 ON
+          </button>
+
+          <!-- 가데이터 일괄 삭제 / 샘플 복원 버튼 -->
+          <button type="button" class="cat-btn btn-danger-clean" id="mapClearAllBtn" title="등록된 모든 지경 가데이터를 일괄 삭제합니다">
+            <span>🗑️</span> 가데이터 일괄 삭제
+          </button>
+          <button type="button" class="cat-btn btn-restore-clean" id="mapRestoreSampleBtn" style="display: none;" title="초기 가데이터(28개)를 복원합니다">
+            <span>🔄</span> 가데이터 복원
+          </button>
+        </div>
+
+        <div class="map-actions-group">
+          <!-- 지도 베이스맵 스타일 선택 메뉴 (워터마크 0% 프리미엄 엔진) -->
+          <div class="map-style-dropdown-wrap" id="mapStyleDropdownWrap">
+            <button type="button" class="map-style-trigger-btn" id="mapStyleTriggerBtn" title="지도 스타일 및 베이스맵 전환">
+              <span id="currentMapStyleIcon">⚡</span>
+              <span id="currentMapStyleText">테마 자동</span>
+              <span class="dropdown-arrow">▾</span>
+            </button>
+            <div class="map-style-dropdown" id="mapStyleDropdown">
+              <div class="map-style-dropdown-header">
+                <span>지도 베이스맵 엔진</span>
+                <span class="badge-free">워터마크 0%</span>
+              </div>
+              <div class="map-style-options-list">
+                <button type="button" class="map-style-item active" data-style="auto">
+                  <span class="style-item-icon">⚡</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">테마 자동 연동 <span class="tag-recommend">기본</span></span>
+                    <span class="style-item-desc">다크 ↔ 라이트 모드 전환 시 자동 변경</span>
+                  </div>
+                </button>
+                <button type="button" class="map-style-item" data-style="dark">
+                  <span class="style-item-icon">🌙</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">다크 캔버스 (Esri Dark)</span>
+                    <span class="style-item-desc">고대비 다크 그래픽 & 국경/도시명 표기</span>
+                  </div>
+                </button>
+                <button type="button" class="map-style-item" data-style="light">
+                  <span class="style-item-icon">☀️</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">라이트 캔버스 (Esri Light)</span>
+                    <span class="style-item-desc">미니멀 그레이 & 국경/도시명 표기</span>
+                  </div>
+                </button>
+                <button type="button" class="map-style-item" data-style="street">
+                  <span class="style-item-icon">🗺️</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">글로벌 도로망 / 지형 (Street)</span>
+                    <span class="style-item-desc">상세 도로망 및 전 세계 지형/도시명</span>
+                  </div>
+                </button>
+                <button type="button" class="map-style-item" data-style="satellite">
+                  <span class="style-item-icon">🛰️</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">위성 항공 지도 (Satellite)</span>
+                    <span class="style-item-desc">고해상도 실사 위성 + 국경선 오버레이</span>
+                  </div>
+                </button>
+                <button type="button" class="map-style-item" data-style="osm">
+                  <span class="style-item-icon">🌐</span>
+                  <div class="style-item-content">
+                    <span class="style-item-title">OpenStreetMap (OSM)</span>
+                    <span class="style-item-desc">오픈스트리트맵 표준 타일</span>
+                  </div>
+                </button>
+              </div>
+              <div class="map-style-dropdown-footer">
+                <button type="button" class="carto-config-btn" id="openCartoKeyModalBtn">
+                  <span>🔑 CARTO API 키 설정</span>
+                  <span class="carto-status-tag" id="cartoKeyStatusTag">무료 엔진 가동</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="map-search-box">
+            <span>🔍</span>
+            <input type="text" id="mapSearchInput" placeholder="국가, 도시명, 사역자 검색...">
+          </div>
+        </div>
+      </div>
+
+      <!-- 워터마크 0% 인터랙티브 지도 캔버스 -->
+      <div id="missionMap"></div>
+
+      <!-- 우측 슬라이드 지경 상세 정보 드로어 -->
+      <aside class="territory-drawer" id="territoryDrawer">
+        <div class="drawer-header">
+          <div class="drawer-title-group" style="display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap;">
+            <span class="brand-badge" id="drawerTribeBadge" style="padding: 0.25rem 0.6rem;">바돌로매</span>
+            <span id="drawerCategoryBadge" class="talent-status-pill badge-church">교회</span>
+            <span id="drawerUnitBadge" class="talent-status-pill" style="display: none; padding: 0.2rem 0.55rem; font-size: 0.72rem; font-weight: 700;">도시 단위</span>
+          </div>
+          <button class="btn-icon" id="closeDrawerBtn">✕</button>
+        </div>
+
+        <div class="drawer-body">
+          <div>
+            <h2 id="drawerCityTitle" style="font-size: 1.45rem; font-weight: 800; color: var(--text-main); margin-bottom: 0.25rem;">독일 프랑크푸르트</h2>
+            <div style="font-size: 0.8rem; color: var(--text-dim);" id="drawerAddress">Hessen, Germany</div>
+          </div>
+
+          <div class="drawer-section">
+            <div class="drawer-section-title">지경 기본 현황</div>
+            <div class="drawer-info-grid">
+              <div class="drawer-info-cell">
+                <span class="cell-label" id="drawerCategoryLabel">지경 명칭 구분</span>
+                <span class="cell-value" id="drawerCategoryName" style="color: var(--primary); font-size: 1.1rem; font-weight: 800;">-</span>
+              </div>
+              <div class="drawer-info-cell" id="drawerMembersCell">
+                <span class="cell-label" id="drawerMembersLabel">바돌로매 재적 현황</span>
+                <span class="cell-value" id="drawerMembersCount" style="font-size: 1.05rem; font-weight: 700;">-</span>
+              </div>
+              <div class="drawer-info-cell" style="margin-top: 0.5rem;">
+                <span class="cell-label">현지 책임 사역자</span>
+                <span class="cell-value" id="drawerLeader">-</span>
+              </div>
+              <div class="drawer-info-cell" style="margin-top: 0.5rem;">
+                <span class="cell-label">최초 개척 연도</span>
+                <span class="cell-value" id="drawerEstYear">-</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="drawer-section">
+            <div class="drawer-section-title">사역 현황 및 특이사항</div>
+            <p id="drawerNotes" style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.6;">-</p>
+          </div>
+
+          <div class="drawer-section">
+            <div class="drawer-section-title">바돌로매 인재 파견 연계</div>
+            <div style="font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; margin-bottom: 0.75rem;">
+              해당 도시의 사용 언어에 적합한 바돌로매 언어 인재를 확인하고 파견 계획을 수립할 수 있습니다.
+            </div>
+            <button class="btn-secondary" style="width: 100%; justify-content: center;" onclick="document.getElementById('tabTalentsBtn').click();">
+              해당 도시 관련 인재 목록 조회 ➔
+            </button>
+          </div>
+
+          <!-- 지경 정보 수정 및 삭제 버튼 그룹 -->
+          <div class="drawer-section" style="border-top: 1px solid var(--border-subtle); padding-top: 0.85rem; margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <button type="button" class="btn-primary" id="editCurrentTerritoryBtn" style="width: 100%; justify-content: center; padding: 0.65rem 1rem;">
+              <span>✏️</span> 이 지경 정보 수정
+            </button>
+            <button type="button" class="btn-danger-outline" id="deleteCurrentTerritoryBtn" style="width: 100%; justify-content: center; padding: 0.65rem 1rem;">
+              <span>🗑️</span> 이 지경 거점 삭제
+            </button>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ==========================================================================
+         [뷰 2] 바돌로매지파 해외 인재 현황판 (Card Gallery View)
+         ========================================================================== -->
+    <main class="talent-view-container" id="talentViewSection" style="display: none;">
+      <!-- 인재 갤러리 상단 컨트롤 바 -->
+      <section class="talent-controls">
+        <div class="filter-pills-row">
+          <span style="font-size: 0.78rem; font-weight: 800; color: var(--text-dim); margin-right: 0.25rem;">언어 필터:</span>
+          <button class="talent-pill talent-lang-pill active" data-lang="ALL">전체 언어</button>
+          <button class="talent-pill talent-lang-pill" data-lang="독일어">독일어</button>
+          <button class="talent-pill talent-lang-pill" data-lang="영어">영어</button>
+          <button class="talent-pill talent-lang-pill" data-lang="스페인어">스페인어</button>
+          <button class="talent-pill talent-lang-pill" data-lang="프랑스어">프랑스어</button>
+        </div>
+
+        <div class="filter-pills-row">
+          <span style="font-size: 0.78rem; font-weight: 800; color: var(--text-dim); margin-right: 0.25rem;">파견 상태:</span>
+          <button class="talent-pill talent-status-pill-btn active" data-status="ALL">전체 상태</button>
+          <button class="talent-pill talent-status-pill-btn" data-status="READY">🟢 즉시 파견 가능</button>
+          <button class="talent-pill talent-status-pill-btn" data-status="DISPATCHED">🔵 현지 파견중</button>
+          <button class="talent-pill talent-status-pill-btn" data-status="TRAINING">🟡 사역 연수중</button>
+          <button class="talent-pill talent-status-pill-btn" data-status="STANDBY">⚪ 국내 사역</button>
+        </div>
+
+        <div class="map-search-box" style="width: 260px;">
+          <span>🔍</span>
+          <input type="text" id="talentSearchInput" placeholder="이름, 전공, 희망도시 검색...">
+        </div>
+      </section>
+
+      <!-- 인재 카드 갤러리 그리드 -->
+      <section class="talent-grid" id="talentsGalleryGrid">
+        <!-- JS로 동적 렌더링 -->
+      </section>
+    </main>
+
+    <!-- ==========================================================================
+         [뷰 3] 총괄·개발자 관제 현황판 (Admin View: 계정 관리 & 사용 이력 & 데이터 관리)
+         ========================================================================== -->
+    <main class="admin-view-container" id="adminViewSection" style="display: none;">
+      <!-- 서브 네비게이션 탭 바 -->
+      <div class="admin-subnav-bar">
+        <div class="admin-subnav-tabs">
+          <button type="button" class="admin-subnav-btn active" data-subtab="accounts" id="adminSubtabAccountsBtn">
+            <span>👥</span> 승인 계정 관리 (<span id="adminSubtabAccountsCount">5</span>)
+          </button>
+          <button type="button" class="admin-subnav-btn" data-subtab="logs" id="adminSubtabLogsBtn">
+            <span>📜</span> 페이지 사용 이력 / 감사 로그 (<span id="adminSubtabLogsCount">0</span>)
+          </button>
+          <button type="button" class="admin-subnav-btn" data-subtab="data" id="adminSubtabDataBtn">
+            <span>💾</span> 지경 가데이터 일괄 제어 & 백업
+          </button>
+        </div>
+
+        <div class="admin-subnav-actions">
+          <button type="button" class="btn-primary" id="openAddAccountBtn">
+            <span>＋</span> 신규 관리 계정 발급
+          </button>
+        </div>
+      </div>
+
+      <!-- 서브패널 1: 계정 관리 패널 -->
+      <section class="admin-panel" id="adminAccountsPanel">
+        <div class="admin-panel-card">
+          <div class="admin-panel-header">
+            <div>
+              <h3 class="admin-panel-title"><span>👥</span> 중앙 승인 계정 목록</h3>
+              <p class="admin-panel-subtitle">해외선교 총괄 관제 시스템 접근 권한이 부여된 관리자 계정 목록입니다.</p>
+            </div>
+            <div style="font-size: 0.78rem; color: var(--text-dim);">
+              * 비밀번호 변경 및 신규 계정 즉시 발급 지원
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="admin-table" id="accountsTable">
+              <thead>
+                <tr>
+                  <th>계정 아이디</th>
+                  <th>직분 / 표시 명칭</th>
+                  <th>권한 등급</th>
+                  <th>최근 로그인 일시</th>
+                  <th>계정 등록일</th>
+                  <th style="text-align: right;">관리 작업</th>
+                </tr>
+              </thead>
+              <tbody id="accountsTableBody">
+                <!-- JS 동적 생성 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 서브패널 2: 페이지 사용 이력 / 감사 로그 패널 -->
+      <section class="admin-panel" id="adminLogsPanel" style="display: none;">
+        <div class="admin-panel-card">
+          <div class="admin-panel-header">
+            <div>
+              <h3 class="admin-panel-title"><span>📜</span> 실시간 시스템 사용 이력 및 활동 로그</h3>
+              <p class="admin-panel-subtitle">로그인, 지경 등록/삭제, 가데이터 초기화, 인재 등록 등 모든 시스템 변경 이력을 실시간 영구 기록합니다.</p>
+            </div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button type="button" class="btn-secondary" id="exportLogsCsvBtn">
+                <span>📥</span> CSV 내보내기
+              </button>
+              <button type="button" class="btn-secondary" id="clearAllLogsBtn" style="color: #ef4444;">
+                <span>🗑️</span> 로그 비우기
+              </button>
+            </div>
+          </div>
+
+          <!-- 로그 필터 바 -->
+          <div class="admin-log-filters">
+            <div class="admin-log-type-chips">
+              <button type="button" class="log-filter-btn active" data-type="ALL">전체 이력</button>
+              <button type="button" class="log-filter-btn" data-type="AUTH">🔐 로그인/인증</button>
+              <button type="button" class="log-filter-btn" data-type="TERRITORY">🗺️ 지경 관리</button>
+              <button type="button" class="log-filter-btn" data-type="TALENT">👥 인재 관리</button>
+              <button type="button" class="log-filter-btn" data-type="ACCOUNT">🔑 계정 발급/수정</button>
+            </div>
+            <div class="map-search-box" style="width: 250px;">
+              <span>🔍</span>
+              <input type="text" id="logSearchInput" placeholder="작업자, 내용 검색...">
+            </div>
+          </div>
+
+          <div class="table-responsive" style="max-height: 520px; overflow-y: auto;">
+            <table class="admin-table" id="logsTable">
+              <thead>
+                <tr>
+                  <th style="width: 170px;">일시 (시간)</th>
+                  <th style="width: 160px;">수행 작업자</th>
+                  <th style="width: 130px;">작업 유형</th>
+                  <th>상세 활동 내역</th>
+                  <th style="width: 90px; text-align: center;">상태</th>
+                </tr>
+              </thead>
+              <tbody id="logsTableBody">
+                <!-- JS 동적 생성 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 서브패널 3: 지경 가데이터 일괄 제어 & 백업 패널 -->
+      <section class="admin-panel" id="adminDataPanel" style="display: none;">
+        <div class="admin-data-grid">
+          <!-- 카드 1: 해외 지경 데이터 일괄 제어 -->
+          <div class="admin-panel-card">
+            <div class="admin-panel-header">
+              <div>
+                <h3 class="admin-panel-title"><span>🗺️</span> 12지파 해외 지경 데이터 일괄 제어</h3>
+                <p class="admin-panel-subtitle">현재 시스템에 등록된 해외 지경 데이터를 일괄 비우거나 샘플 데이터를 복원합니다.</p>
+              </div>
+            </div>
+            <div style="padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem;">
+              <div class="engine-notice-card" style="background: rgba(239, 68, 68, 0.08); border-color: rgba(239, 68, 68, 0.25);">
+                <div class="engine-notice-icon">⚠️</div>
+                <div class="engine-notice-content">
+                  <strong style="color: #ef4444;">가데이터 일괄 삭제 안내</strong>
+                  <p>
+                    현재 등록된 지경 가데이터를 한 번에 삭제하여 지도를 깨끗하게 비웁니다.
+                    실제 해외 지경 거점을 신규 등록하고자 하실 때 사용하시기 바랍니다.
+                    (삭제 후에도 아래의 '샘플 복원' 버튼으로 언제든 다시 복구할 수 있습니다)
+                  </p>
+                </div>
+              </div>
+
+              <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem;">
+                <button type="button" class="btn-primary" id="adminClearAllTerritoriesBtn" style="background: #dc2626; border-color: #ef4444;">
+                  <span>🗑️</span> 등록된 모든 지경 가데이터 일괄 삭제
+                </button>
+                <button type="button" class="btn-secondary" id="adminRestoreSampleBtn">
+                  <span>🔄</span> 초기 가데이터(28개) 다시 복원
+                </button>
+              </div>
+
+              <div style="border-top: 1px solid var(--border-subtle); padding-top: 1rem; margin-top: 0.5rem;">
+                <span class="field-group-title">데이터 백업 및 다운로드</span>
+                <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
+                  <button type="button" class="btn-secondary" id="backupTerritoriesJsonBtn">
+                    <span>💾</span> 지경 데이터 JSON 백업 다운로드
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 카드 2: 시스템 환경 정보 -->
+          <div class="admin-panel-card">
+            <div class="admin-panel-header">
+              <div>
+                <h3 class="admin-panel-title"><span>🛡️</span> 관제 시스템 상태 및 세션 정보</h3>
+                <p class="admin-panel-subtitle">현재 단말의 보안 세션 및 데이터 스토리지 현황입니다.</p>
+              </div>
+            </div>
+            <div style="padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.84rem;">
+              <div style="display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);">
+                <span style="color: var(--text-dim);">현재 접속 계정</span>
+                <strong id="adminCurrentAccountDisplay">-</strong>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);">
+                <span style="color: var(--text-dim);">데이터 영구 보존</span>
+                <span style="color: #10b981; font-weight: 700;">로컬 영구 스토리지 (LocalStorage)</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);">
+                <span style="color: var(--text-dim);">지도 베이스맵 엔진</span>
+                <span>Esri ArcGIS HD (워터마크 0%)</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);">
+                <span style="color: var(--text-dim);">보안 설정</span>
+                <span style="color: #10b981; font-weight: 700;">외부 검색엔진 100% 차단됨</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ==========================================================================
+       모달 1: 보안 로그인 게이트웨이 (외부 접속 차단)
+       ========================================================================== -->
+  <div class="modal-overlay login-gate-modal" id="loginModal">
+    <div class="modal-card login-gate-card">
+      <div class="modal-body" style="padding: 2.25rem 2rem;">
+        <div class="login-logo-glow">🔐</div>
+        <h2 style="font-size: 1.35rem; font-weight: 800; color: var(--text-main); margin-bottom: 0.4rem;">
+          해외선교 총괄 관제 포털
+        </h2>
+        <p style="font-size: 0.82rem; color: var(--text-dim); margin-bottom: 1.75rem;">
+          중앙 부장 · 총무 · 서무 승인 단말 전용 보안 접속 게이트
+        </p>
+
+        <form id="loginForm" style="display: flex; flex-direction: column; gap: 1rem; text-align: left;">
+          <div class="form-group">
+            <label class="form-label" for="loginUser">승인 아이디</label>
+            <input type="text" id="loginUser" class="form-input" placeholder="부여받은 아이디를 입력하세요" required autofocus autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="loginPass">비밀번호</label>
+            <input type="password" id="loginPass" class="form-input" placeholder="비밀번호를 입력하세요" required>
+          </div>
+
+          <div id="loginErrorMsg" style="display: none; font-size: 0.78rem; color: #ef4444; background: rgba(239, 68, 68, 0.1); padding: 0.5rem; border-radius: 4px; text-align: center;"></div>
+
+          <button type="submit" class="btn-primary" style="width: 100%; justify-content: center; padding: 0.75rem; font-size: 0.95rem; margin-top: 0.5rem;">
+            시스템 보안 접속 ➔
+          </button>
+
+          <button type="button" class="btn-secondary" id="quickDemoLoginBtn" style="width: 100%; justify-content: center; font-size: 0.8rem; margin-top: 0.25rem;">
+            ⚡ 간편 접속 (임원 공용 계정 즉시 입력)
+          </button>
+        </form>
+
+        <div style="font-size: 0.72rem; color: var(--text-dim); margin-top: 1.5rem; line-height: 1.5;">
+          🛡️ 본 시스템은 외부 검색엔진에 노출되지 않으며, 모든 열람 세션은 암호화 처리됩니다.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 2: 신규 해외 지경 등록 (도시 단위 등록)
+       ========================================================================== -->
+  <div class="modal-overlay" id="addTerritoryModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>📍</span> 신규 해외 지경 등록</h3>
+        <button class="btn-icon" id="closeAddTerritoryBtn">✕</button>
+      </div>
+      <form id="addTerritoryForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">소속 지파 선택</label>
+            <select class="form-select" id="newTribeId" required></select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">관할 단위 구분 <span style="color: #ef4444;">*</span></label>
+            <div class="unit-type-selector-wrap" style="display: flex; gap: 0.75rem; margin-top: 0.25rem;">
+              <label class="unit-type-option" id="newUnitCityLabel" style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.85rem; background: var(--bg-card); border: 1.5px solid var(--primary); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.2s;">
+                <input type="radio" name="newTerritoryUnit" value="CITY" checked style="accent-color: var(--primary);">
+                <div style="display: flex; flex-direction: column;">
+                  <span style="font-weight: 800; font-size: 0.86rem; color: var(--text-main);">🏙️ 도시 단위 (City)</span>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">특정 도시 중심 거점 관할</span>
+                </div>
+              </label>
+              <label class="unit-type-option" id="newUnitStateLabel" style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.85rem; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.2s;">
+                <input type="radio" name="newTerritoryUnit" value="STATE" style="accent-color: var(--primary);">
+                <div style="display: flex; flex-direction: column;">
+                  <span style="font-weight: 800; font-size: 0.86rem; color: var(--text-main);">🗺️ 주·광역 단위 (State)</span>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">주/도 전체를 포괄하는 광역 관할</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">국가명 <span style="color: #ef4444;">*</span></label>
+              <input type="text" class="form-input" id="newCountry" placeholder="예: 독일, 미국, 프랑스" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label" id="newCityLabel">도시명 (입력 시 좌표 자동 연동) <span style="color: #ef4444;">*</span></label>
+              <input type="text" class="form-input" id="newCity" placeholder="예: 베를린, 파리, 뉴욕" required>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">지경 등급 선택 <span style="color: #ef4444;">*</span></label>
+              <select class="form-select" id="newCategory" required>
+                <option value="CHURCH">⛪ 교회 (자립 거점)</option>
+                <option value="BRANCH">🚩 지역 (준교회 거점)</option>
+                <option value="PIONEER" selected>🧭 개척지 (신규 개척)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">현지 책임 사역자</label>
+              <input type="text" class="form-input" id="newLeader" placeholder="성명 및 직분 (미정 시 공란)">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">재적 성도 수 (선택 사항 · 타지파 미상 시 공란 가능)</label>
+            <input type="number" class="form-input" id="newMembers" placeholder="성도 수 입력 또는 미상 시 비워두세요" min="0">
+            <div style="font-size: 0.74rem; color: var(--text-dim); margin-top: 2px;">
+              ※ 타지파 등 성도 수를 알지 못하는 경우 비워두셔도 선택하신 등급(교회/지역/개척지)으로 즉시 정상 집계 및 표출됩니다.
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">위도 (Latitude · 도시명 입력 시 자동 산출)</label>
+              <input type="number" step="0.0001" class="form-input" id="newLat" placeholder="도시명 입력 시 자동 입력">
+            </div>
+            <div class="form-group">
+              <label class="form-label">경도 (Longitude · 도시명 입력 시 자동 산출)</label>
+              <input type="number" step="0.0001" class="form-input" id="newLng" placeholder="도시명 입력 시 자동 입력">
+            </div>
+          </div>
+          <div id="newGeoStatus" style="font-size: 0.76rem; color: var(--primary); font-weight: 700; margin-top: -0.35rem; display: none;"></div>
+
+          <div class="form-group">
+            <label class="form-label">사역 현황 및 비고</label>
+            <textarea class="form-textarea" id="newNotes" placeholder="개척 배경, 현지인 현황, 기도 제목 등 입력"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelAddTerritoryBtn">취소</button>
+          <button type="submit" class="btn-primary">지경 등록 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 3: 바돌로매 신규 언어 인재 등록
+       ========================================================================== -->
+  <div class="modal-overlay" id="addTalentModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>👤</span> 바돌로매 해외 언어 인재 등록</h3>
+        <button class="btn-icon" id="closeAddTalentBtn">✕</button>
+      </div>
+      <form id="addTalentForm">
+        <div class="modal-body">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">인재 성명</label>
+              <input type="text" class="form-input" id="newTalentName" placeholder="홍길동" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">성별 / 연령</label>
+              <div style="display: flex; gap: 0.5rem;">
+                <select class="form-select" id="newTalentGender" style="width: 80px;">
+                  <option value="남">남</option>
+                  <option value="여">여</option>
+                </select>
+                <input type="number" class="form-input" id="newTalentAge" placeholder="나이" value="28" style="flex: 1;" required>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">소속 부서</label>
+              <select class="form-select" id="newTalentDept">
+                <option value="청년부">청년부</option>
+                <option value="장년부">장년부</option>
+                <option value="부녀부">부녀부</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">직분</label>
+              <input type="text" class="form-input" id="newTalentRole" placeholder="예: 구역장, 총무">
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">주요 구사 언어</label>
+              <select class="form-select" id="newTalentPrimaryLang">
+                <option value="독일어">독일어</option>
+                <option value="영어">영어</option>
+                <option value="스페인어">스페인어</option>
+                <option value="프랑스어">프랑스어</option>
+                <option value="일본어">일본어</option>
+                <option value="중국어">중국어</option>
+                <option value="기타">기타 외국어</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">언어 숙련도 / 공인시험</label>
+              <input type="text" class="form-input" id="newTalentLangLevel" placeholder="예: C1 (유창), TOEIC 900" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">현재 파견 상태</label>
+            <select class="form-select" id="newTalentStatus">
+              <option value="READY">🟢 즉시 파견 가능</option>
+              <option value="DISPATCHED">🔵 현지 파견중</option>
+              <option value="TRAINING">🟡 사역 연수중</option>
+              <option value="STANDBY">⚪ 국내 사역 (언어 지원)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">희망 파견 도시 (쉼표 구분)</label>
+            <input type="text" class="form-input" id="newTalentCities" placeholder="예: 베를린, 프랑크푸르트, 비엔나">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">보유 역량 / 특기 (쉼표 구분)</label>
+            <input type="text" class="form-input" id="newTalentSpecialties" placeholder="예: 동시통역, 문서번역, IT/영상, 회계">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">연락처</label>
+            <input type="text" class="form-input" id="newTalentContact" placeholder="010-0000-0000">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">임원진 평가 및 메모</label>
+            <textarea class="form-textarea" id="newTalentMemo" placeholder="면담 내용 및 추천 사유 입력"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelAddTalentBtn">취소</button>
+          <button type="submit" class="btn-primary">인재 등록 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 4: 바돌로매 인재 심층 상세 프로필 모달
+       ========================================================================== -->
+  <div class="modal-overlay" id="talentDetailModal">
+    <div class="modal-card" style="max-width: 580px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>📋</span> 인재 상세 역량 프로필</h3>
+        <button type="button" class="btn-icon" id="closeTalentDetailBtn" onclick="document.getElementById('talentDetailModal').classList.remove('open')" title="닫기">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; align-items: center; gap: 1.25rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-subtle);">
+          <img src="" id="detailTalentAvatar" class="talent-avatar" style="width: 72px; height: 72px;" alt="">
+          <div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <h2 id="detailTalentName" style="font-size: 1.35rem; font-weight: 800; color: var(--text-main);">-</h2>
+              <span id="detailTalentStatus" class="talent-status-pill status-ready" style="font-size: 0.72rem;">-</span>
+            </div>
+            <div id="detailTalentRole" style="font-size: 0.82rem; color: var(--text-dim); margin-top: 0.2rem;">-</div>
+            <div id="detailTalentContact" style="font-size: 0.8rem; color: var(--primary); margin-top: 0.25rem;">-</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="field-group-title">공인 어학 역량 및 자격</div>
+          <div id="detailTalentLanguages" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+        </div>
+
+        <div>
+          <div class="field-group-title">희망 파견 도시 및 지경</div>
+          <p id="detailTalentCities" style="font-size: 0.88rem; color: var(--text-main);"></p>
+        </div>
+
+        <div>
+          <div class="field-group-title">전문 역량 및 특기</div>
+          <p id="detailTalentSpecialties" style="font-size: 0.88rem; color: var(--text-main);"></p>
+        </div>
+
+        <div>
+          <div class="field-group-title">해외 사역 및 체류 경험</div>
+          <p id="detailTalentExp" style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.5; background: var(--bg-card); border: 1px solid var(--border-subtle); padding: 0.65rem; border-radius: 6px;"></p>
+        </div>
+
+        <div>
+          <div class="field-group-title">중앙 임원진 추천 메모</div>
+          <p id="detailTalentMemo" style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.5; background: var(--primary-glow); border: 1px solid var(--border-highlight); padding: 0.65rem; border-radius: 6px;"></p>
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" class="btn-primary" id="openEditTalentModalBtn" style="padding: 0.5rem 1rem;">
+            <span>✏️</span> 이 인재 정보 수정
+          </button>
+          <button type="button" class="btn-danger-outline" id="deleteCurrentTalentBtn" style="padding: 0.5rem 1rem;">
+            <span>🗑️</span> 이 인재 삭제
+          </button>
+        </div>
+        <button type="button" class="btn-secondary" onclick="document.getElementById('talentDetailModal').classList.remove('open')">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 5: 지도 엔진 및 CARTO API 키 설정 모달
+       ========================================================================== -->
+  <div class="modal-overlay" id="cartoKeyModal">
+    <div class="modal-card" style="max-width: 540px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>🗺️</span> 지도 베이스맵 엔진 & API 설정</h3>
+        <button type="button" class="btn-icon" id="closeCartoKeyModalBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="engine-notice-card">
+          <div class="engine-notice-icon">✨</div>
+          <div class="engine-notice-content">
+            <strong>워터마크 없는 초고화질 지도 제공 안내</strong>
+            <p>
+              CARTO 사의 비인증 요청 제한 정책으로 인해 발생했던 <em>"API KEY REQUIRED"</em> 워터마크 문제를 완전히 해결하였습니다.
+              현재 시스템은 <strong>워터마크 0%의 Esri 고화질 글로벌 지도 엔진</strong>으로 가동 중이며, 별도의 API 키 없이도 즉시 모든 대륙과 국경, 도시명이 깨끗하게 표시됩니다.
+            </p>
+          </div>
+        </div>
+
+        <div style="margin-top: 1rem;">
+          <div class="field-group-title">CARTO 공식 API 키 등록 (선택 사항)</div>
+          <p style="font-size: 0.8rem; color: var(--text-dim); margin-bottom: 0.75rem; line-height: 1.5;">
+            CARTO Voyager / Dark Matter 스타일을 직접 사용하고자 하실 경우, CARTO 공식 무료 API 키를 아래에 입력해 주시면 워터마크 없이 정상 연동됩니다.
+          </p>
+
+          <div class="form-group">
+            <label class="form-label" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>CARTO API Key</span>
+              <a href="https://carto.com/basemaps/apikey" target="_blank" rel="noopener noreferrer" style="color: var(--primary); font-size: 0.76rem; text-decoration: underline;">
+                CARTO 공식 무료 키 발급 (1분 소요, 이메일 즉시 전송) ↗
+              </a>
+            </label>
+            <input type="text" class="form-input" id="cartoApiKeyInput" placeholder="CARTO API 키를 입력하세요 (예: default_api_key...)">
+          </div>
+
+          <div id="cartoKeyCurrentStatus" style="font-size: 0.78rem; padding: 0.5rem 0.75rem; border-radius: 6px; background: var(--bg-card); border: 1px solid var(--border-subtle); margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span id="cartoKeyStatusDot" style="width: 8px; height: 8px; border-radius: 50%; background: #10b981;"></span>
+            <span id="cartoKeyStatusDetail" style="color: var(--text-main);">기본 엔진 (Esri 워터마크 0% 모드) 활성화됨</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: space-between;">
+        <button type="button" class="btn-secondary" id="clearCartoKeyBtn">키 삭제 (기본 엔진 복원)</button>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="button" class="btn-secondary" id="cancelCartoKeyBtn">닫기</button>
+          <button type="button" class="btn-primary" id="saveCartoKeyBtn">저장 및 적용</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 6: 전체 지경 가데이터 일괄 삭제 확인 모달
+       ========================================================================== -->
+  <div class="modal-overlay" id="clearTerritoriesConfirmModal">
+    <div class="modal-card" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3 class="modal-title" style="color: #ef4444;"><span>⚠️</span> 지경 가데이터 일괄 삭제</h3>
+        <button type="button" class="btn-icon" id="closeClearTerritoriesModalBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="engine-notice-card" style="background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3);">
+          <div class="engine-notice-icon">🗑️</div>
+          <div class="engine-notice-content">
+            <strong style="color: #ef4444;">등록된 모든 지경 데이터 삭제</strong>
+            <p>
+              현재 지도상에 등록된 <strong id="clearTerritoryCountNotice">28개</strong>의 전 세계 해외 지경 거점을 모두 비웁니다.
+              삭제 후 실제 신규 지경을 등록하실 수 있으며, 필요 시 '총괄·개발자 관제' 탭에서 초기 샘플 데이터를 언제든 다시 복원할 수 있습니다.
+            </p>
+          </div>
+        </div>
+        <p style="font-size: 0.82rem; color: var(--text-dim); margin-top: 0.5rem; line-height: 1.5;">
+          정말로 모든 지경 가데이터를 삭제하고 초기화하시겠습니까?
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="cancelClearTerritoriesBtn">취소</button>
+        <button type="button" class="btn-primary" id="confirmClearTerritoriesBtn" style="background: #dc2626; border-color: #ef4444;">
+          네, 모두 삭제합니다
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 7: 신규 승인 관리자 계정 발급 모달
+       ========================================================================== -->
+  <div class="modal-overlay" id="addAccountModal">
+    <div class="modal-card" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>🔑</span> 신규 관리자 계정 발급</h3>
+        <button type="button" class="btn-icon" id="closeAddAccountBtn">✕</button>
+      </div>
+      <form id="addAccountForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">아이디 (ID)</label>
+            <input type="text" class="form-input" id="newAccountId" placeholder="예: mission_lead" required autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">초기 비밀번호</label>
+            <input type="password" class="form-input" id="newAccountPass" placeholder="6자리 이상 비밀번호 입력" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">담당자 성명 및 표시 직분</label>
+            <input type="text" class="form-input" id="newAccountLabel" placeholder="예: 유럽선교 서무 (이요한)" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">권한 역할 등급</label>
+            <select class="form-select" id="newAccountRole" required>
+              <option value="EXECUTIVE">중앙 임원진 (부장 / 총무)</option>
+              <option value="STAFF">실무 담당 (서무 / 간사)</option>
+              <option value="DEV">기술 및 개발자 (DEV)</option>
+              <option value="MASTER">총괄 관제 (MASTER 최고 권한)</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelAddAccountBtn">취소</button>
+          <button type="submit" class="btn-primary">계정 발급 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 8: 계정 비밀번호 변경 모달
+       ========================================================================== -->
+  <div class="modal-overlay" id="changePasswordModal">
+    <div class="modal-card" style="max-width: 440px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>🔒</span> 계정 비밀번호 변경</h3>
+        <button type="button" class="btn-icon" id="closeChangePassBtn">✕</button>
+      </div>
+      <form id="changePasswordForm">
+        <div class="modal-body">
+          <input type="hidden" id="changePassTargetId">
+          <div style="font-size: 0.84rem; color: var(--text-dim); margin-bottom: 0.5rem;">
+            대상 계정: <strong id="changePassTargetLabel" style="color: var(--text-main);">-</strong>
+          </div>
+          <div class="form-group">
+            <label class="form-label">새로운 비밀번호</label>
+            <input type="password" class="form-input" id="newPasswordInput" placeholder="새로운 비밀번호 입력" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">비밀번호 확인</label>
+            <input type="password" class="form-input" id="newPasswordConfirmInput" placeholder="새로운 비밀번호 재입력" required>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelChangePassBtn">취소</button>
+          <button type="submit" class="btn-primary">비밀번호 변경</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 8-2: 관리자 계정 정보 수정 모달 (Edit Account Modal)
+       ========================================================================== -->
+  <div class="modal-overlay" id="editAccountModal">
+    <div class="modal-card" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>✏️</span> 관리자 계정 정보 수정</h3>
+        <button type="button" class="btn-icon" id="closeEditAccountBtn" onclick="document.getElementById('editAccountModal').classList.remove('open')" title="닫기">✕</button>
+      </div>
+      <form id="editAccountForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">계정 아이디 (수정 불가)</label>
+            <input type="text" class="form-input" id="editAccountId" readonly style="opacity: 0.7; cursor: not-allowed; background: rgba(0, 0, 0, 0.2);">
+          </div>
+          <div class="form-group">
+            <label class="form-label">담당자 성명 및 직분</label>
+            <input type="text" class="form-input" id="editAccountLabel" placeholder="예: 중앙 부장, 총무, 서무" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">권한 역할 등급</label>
+            <select class="form-select" id="editAccountRole" required>
+              <option value="EXECUTIVE">중앙 임원진 (부장 / 총무)</option>
+              <option value="STAFF">실무 담당 (서무 / 간사)</option>
+              <option value="DEV">기술 및 개발자 (DEV)</option>
+              <option value="MASTER">총괄 관제 (MASTER 최고 권한)</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelEditAccountBtn" onclick="document.getElementById('editAccountModal').classList.remove('open')">취소</button>
+          <button type="submit" class="btn-primary">수정사항 저장 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 9: 지경 정보 수정 모달 (Edit Territory Modal)
+       ========================================================================== -->
+  <div class="modal-overlay" id="editTerritoryModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>✏️</span> 해외 지경 정보 수정</h3>
+        <button type="button" class="btn-icon" id="closeEditTerritoryBtn" onclick="document.getElementById('editTerritoryModal').classList.remove('open')" title="닫기">✕</button>
+      </div>
+      <form id="editTerritoryForm">
+        <input type="hidden" id="editTerritoryId">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">소속 지파 선택</label>
+            <select class="form-select" id="editTribeId" required></select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">관할 단위 구분 <span style="color: #ef4444;">*</span></label>
+            <div class="unit-type-selector-wrap" style="display: flex; gap: 0.75rem; margin-top: 0.25rem;">
+              <label class="unit-type-option" id="editUnitCityLabel" style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.85rem; background: var(--bg-card); border: 1.5px solid var(--primary); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.2s;">
+                <input type="radio" name="editTerritoryUnit" value="CITY" checked style="accent-color: var(--primary);">
+                <div style="display: flex; flex-direction: column;">
+                  <span style="font-weight: 800; font-size: 0.86rem; color: var(--text-main);">🏙️ 도시 단위 (City)</span>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">특정 도시 중심 거점 관할</span>
+                </div>
+              </label>
+              <label class="unit-type-option" id="editUnitStateLabel" style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.85rem; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.2s;">
+                <input type="radio" name="editTerritoryUnit" value="STATE" style="accent-color: var(--primary);">
+                <div style="display: flex; flex-direction: column;">
+                  <span style="font-weight: 800; font-size: 0.86rem; color: var(--text-main);">🗺️ 주·광역 단위 (State)</span>
+                  <span style="font-size: 0.72rem; color: var(--text-dim);">주/도 전체를 포괄하는 광역 관할</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">국가명 <span style="color: #ef4444;">*</span></label>
+              <input type="text" class="form-input" id="editCountry" placeholder="예: 독일, 미국, 프랑스" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label" id="editCityLabel">도시명 (입력 시 좌표 자동 연동) <span style="color: #ef4444;">*</span></label>
+              <input type="text" class="form-input" id="editCity" placeholder="예: 베를린, 파리, 뉴욕" required>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">지경 등급 선택 <span style="color: #ef4444;">*</span></label>
+              <select class="form-select" id="editCategory" required>
+                <option value="CHURCH">⛪ 교회 (자립 거점)</option>
+                <option value="BRANCH">🚩 지역 (준교회 거점)</option>
+                <option value="PIONEER">🧭 개척지 (신규 개척)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">현지 책임 사역자</label>
+              <input type="text" class="form-input" id="editLeader" placeholder="성명 및 직분">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">재적 성도 수 (선택 사항 · 타지파 미상 시 공란 가능)</label>
+            <input type="number" class="form-input" id="editMembers" placeholder="성도 수 입력 또는 미상 시 비워두세요" min="0">
+            <div style="font-size: 0.74rem; color: var(--text-dim); margin-top: 2px;">
+              ※ 타지파 지경 등 성도 수를 알지 못하는 경우 비워두셔도 선택하신 등급(교회/지역/개척지)으로 즉시 정상 집계 및 표출됩니다.
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">위도 (Latitude · 도시명 입력 시 자동 산출)</label>
+              <input type="number" step="0.0001" class="form-input" id="editLat" placeholder="도시명 입력 시 자동 입력">
+            </div>
+            <div class="form-group">
+              <label class="form-label">경도 (Longitude · 도시명 입력 시 자동 산출)</label>
+              <input type="number" step="0.0001" class="form-input" id="editLng" placeholder="도시명 입력 시 자동 입력">
+            </div>
+          </div>
+          <div id="editGeoStatus" style="font-size: 0.76rem; color: var(--primary); font-weight: 700; margin-top: -0.35rem; display: none;"></div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">최초 개척 연도</label>
+              <input type="number" class="form-input" id="editEstYear" placeholder="예: 2018">
+            </div>
+            <div class="form-group">
+              <label class="form-label">상세 주소 / 위치</label>
+              <input type="text" class="form-input" id="editAddress" placeholder="예: Frankfurt am Main, Germany">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">사역 현황 및 비고</label>
+            <textarea class="form-textarea" id="editNotes" placeholder="개척 배경, 현지인 현황, 기도 제목 등 입력"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelEditTerritoryBtn" onclick="document.getElementById('editTerritoryModal').classList.remove('open')">취소</button>
+          <button type="submit" class="btn-primary">수정사항 저장 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================================================
+       모달 10: 인재 정보 수정 모달 (Edit Talent Modal)
+       ========================================================================== -->
+  <div class="modal-overlay" id="editTalentModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title"><span>✏️</span> 바돌로매 해외 인재 정보 수정</h3>
+        <button type="button" class="btn-icon" id="closeEditTalentBtn" onclick="document.getElementById('editTalentModal').classList.remove('open')" title="닫기">✕</button>
+      </div>
+      <form id="editTalentForm">
+        <input type="hidden" id="editTalentId">
+        <div class="modal-body">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">인재 성명</label>
+              <input type="text" class="form-input" id="editTalentName" placeholder="성명 입력" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">성별 / 연령</label>
+              <div style="display: flex; gap: 0.5rem;">
+                <select class="form-select" id="editTalentGender" style="width: 80px;">
+                  <option value="남">남</option>
+                  <option value="여">여</option>
+                </select>
+                <input type="number" class="form-input" id="editTalentAge" placeholder="나이" style="flex: 1;" required>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">소속 부서</label>
+              <select class="form-select" id="editTalentDept">
+                <option value="청년부">청년부</option>
+                <option value="장년부">장년부</option>
+                <option value="부녀부">부녀부</option>
+                <option value="기타부서">기타</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">직분</label>
+              <input type="text" class="form-input" id="editTalentRole" placeholder="예: 전도부장, 총무">
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div class="form-group">
+              <label class="form-label">주요 구사 언어</label>
+              <select class="form-select" id="editTalentPrimaryLang">
+                <option value="독일어">독일어</option>
+                <option value="영어">영어</option>
+                <option value="스페인어">스페인어</option>
+                <option value="프랑스어">프랑스어</option>
+                <option value="일본어">일본어</option>
+                <option value="중국어">중국어</option>
+                <option value="기타">기타 외국어</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">언어 숙련도 / 공인시험</label>
+              <input type="text" class="form-input" id="editTalentLangLevel" placeholder="예: C1, Goethe B2" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">현재 파견 상태</label>
+            <select class="form-select" id="editTalentStatus">
+              <option value="READY">🟢 즉시 파견 가능</option>
+              <option value="DISPATCHED">🔵 현지 파견중</option>
+              <option value="TRAINING">🟡 사역 연수중</option>
+              <option value="STANDBY">⚪ 국내 사역 (언어 지원)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">희망 파견 도시 (쉼표 구분)</label>
+            <input type="text" class="form-input" id="editTalentCities" placeholder="예: 프랑크푸르트, 베를린">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">보유 역량 / 특기 (쉼표 구분)</label>
+            <input type="text" class="form-input" id="editTalentSpecialties" placeholder="예: 성경교류, 교재번역, 시설관리">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">연락처</label>
+            <input type="text" class="form-input" id="editTalentContact" placeholder="010-0000-0000">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">해외 사역 및 체류 경험</label>
+            <textarea class="form-textarea" id="editTalentExp" placeholder="체류 기간, 사역 경력 등 입력"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">중앙 임원진 평가 및 메모</label>
+            <textarea class="form-textarea" id="editTalentMemo" placeholder="추천 사유, 특기사항 등 입력"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="cancelEditTalentBtn" onclick="document.getElementById('editTalentModal').classList.remove('open')">취소</button>
+          <button type="submit" class="btn-primary">수정사항 저장 완료</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Leaflet Vector Map Engine JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <!-- Supabase Cloud DB Realtime SDK (실시간 다중 기기 자동 동기화) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- 통합 런타임 번들 (file:// 직접 열기 & 웹서버 100% 호환) -->
+  <script src="./js/app.bundle.js"></script>
+</body>
+</html>
