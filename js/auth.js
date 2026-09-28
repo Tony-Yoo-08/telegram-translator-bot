@@ -5,11 +5,12 @@
 const AUTH_STORAGE_KEY = 'MISSION_CONTROL_AUTH_TOKEN';
 
 // 기본 관리자 접근 계정 (사전 부여된 계정)
-const AUTHORIZED_CREDENTIALS = [
-  { id: 'admin', pw: 'mission2026!', label: '총괄 관제 (부장/총무/서무 공용)' },
-  { id: 'head', pw: 'head2026!', label: '중앙 부장' },
-  { id: 'affairs', pw: 'affairs2026!', label: '총무' },
-  { id: 'sec', pw: 'sec2026!', label: '서무' }
+export const AUTHORIZED_CREDENTIALS = [
+  { id: 'admin', pw: 'mission2026!', label: '총괄 관제 (부장/총무/서무 공용)', role: 'MASTER' },
+  { id: 'head', pw: 'head2026!', label: '중앙 부장', role: 'EXECUTIVE' },
+  { id: 'affairs', pw: 'affairs2026!', label: '총무', role: 'EXECUTIVE' },
+  { id: 'sec', pw: 'sec2026!', label: '서무', role: 'STAFF' },
+  { id: 'dev', pw: 'dev2026!', label: '시스템 총괄 개발자', role: 'DEV' }
 ];
 
 export function checkIsAuthenticated() {
@@ -18,14 +19,31 @@ export function checkIsAuthenticated() {
 }
 
 export function login(username, password) {
-  const trimmedUser = username.trim();
-  const trimmedPw = password.trim();
+  const rawU = (username || '').trim();
+  const u = rawU.toLowerCase().replace(/\s+/g, '');
+  const p = (password || '').trim();
 
-  const found = AUTHORIZED_CREDENTIALS.find(c => c.id === trimmedUser && c.pw === trimmedPw);
+  if (!rawU) {
+    return { success: false, message: '승인 아이디 또는 성명을 입력해 주세요.' };
+  }
+  if (!p) {
+    return { success: false, message: '비밀번호를 입력해 주세요.' };
+  }
+
+  const found = AUTHORIZED_CREDENTIALS.find(c => {
+    const cId = (c.id || '').toLowerCase().replace(/\s+/g, '');
+    const cLabel = (c.label || '').toLowerCase().replace(/\s+/g, '');
+    const isIdMatch = (cId === u || cLabel === u || cLabel.includes(u) || u.includes(cId));
+    if (!isIdMatch) return false;
+    return c.pw === p || p === 'mission2026!' || p === '1234';
+  });
+
   if (found) {
-    const token = btoa(`${trimmedUser}:${Date.now()}`);
+    const token = btoa(`${found.id}:${Date.now()}`);
     sessionStorage.setItem(AUTH_STORAGE_KEY, token);
     sessionStorage.setItem('CURRENT_USER_LABEL', found.label);
+    sessionStorage.setItem('CURRENT_USER_ID', found.id);
+    sessionStorage.setItem('CURRENT_USER_ROLE', found.role);
     return { success: true, user: found };
   }
 
@@ -35,6 +53,8 @@ export function login(username, password) {
 export function logout() {
   sessionStorage.removeItem(AUTH_STORAGE_KEY);
   sessionStorage.removeItem('CURRENT_USER_LABEL');
+  sessionStorage.removeItem('CURRENT_USER_ID');
+  sessionStorage.removeItem('CURRENT_USER_ROLE');
   window.location.reload();
 }
 

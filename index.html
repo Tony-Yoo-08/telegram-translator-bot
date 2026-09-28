@@ -574,11 +574,15 @@
               </div>
 
               <div style="border-top: 1px solid var(--border-subtle); padding-top: 1rem; margin-top: 0.5rem;">
-                <span class="field-group-title">데이터 백업 및 다운로드</span>
-                <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
+                <span class="field-group-title">데이터 백업 및 가져오기 (기기 간 이동)</span>
+                <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem; flex-wrap: wrap;">
                   <button type="button" class="btn-secondary" id="backupTerritoriesJsonBtn">
                     <span>💾</span> 지경 데이터 JSON 백업 다운로드
                   </button>
+                  <label class="btn-primary" style="margin-bottom:0; cursor:pointer; background: #3b82f6; border-color: #60a5fa;" id="restoreTerritoriesJsonLabel">
+                    <span>📂</span> 백업된 JSON 파일 불러오기
+                    <input type="file" id="importTerritoriesJsonInput" accept=".json" style="display: none;">
+                  </label>
                 </div>
               </div>
             </div>
@@ -621,7 +625,7 @@
        ========================================================================== -->
   <div class="modal-overlay login-gate-modal" id="loginModal">
     <div class="modal-card login-gate-card">
-      <div class="modal-body" style="padding: 2.25rem 2rem;">
+      <div class="modal-body" style="padding: 2.5rem 2rem;">
         <div class="login-logo-glow">🔐</div>
         <h2 style="font-size: 1.35rem; font-weight: 800; color: var(--text-main); margin-bottom: 0.4rem;">
           해외선교 총괄 관제 포털
@@ -630,10 +634,11 @@
           중앙 부장 · 총무 · 서무 승인 단말 전용 보안 접속 게이트
         </p>
 
+        <!-- 승인 계정 직접 입력 전용 보안 로그인 폼 -->
         <form id="loginForm" style="display: flex; flex-direction: column; gap: 1rem; text-align: left;">
           <div class="form-group">
             <label class="form-label" for="loginUser">승인 아이디</label>
-            <input type="text" id="loginUser" class="form-input" placeholder="부여받은 아이디를 입력하세요" required autofocus autocomplete="off">
+            <input type="text" id="loginUser" class="form-input" placeholder="부여받은 승인 아이디를 입력하세요" required autofocus autocomplete="off">
           </div>
           <div class="form-group">
             <label class="form-label" for="loginPass">비밀번호</label>
@@ -644,10 +649,6 @@
 
           <button type="submit" class="btn-primary" style="width: 100%; justify-content: center; padding: 0.75rem; font-size: 0.95rem; margin-top: 0.5rem;">
             시스템 보안 접속 ➔
-          </button>
-
-          <button type="button" class="btn-secondary" id="quickDemoLoginBtn" style="width: 100%; justify-content: center; font-size: 0.8rem; margin-top: 0.25rem;">
-            ⚡ 간편 접속 (임원 공용 계정 즉시 입력)
           </button>
         </form>
 

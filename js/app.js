@@ -69,16 +69,6 @@ function initAuthGate() {
     });
   }
 
-  // 빠른 데모 로그인 버튼
-  const quickDemoBtn = document.getElementById('quickDemoLoginBtn');
-  if (quickDemoBtn) {
-    quickDemoBtn.addEventListener('click', () => {
-      document.getElementById('loginUser').value = 'admin';
-      document.getElementById('loginPass').value = 'mission2026!';
-      loginForm.dispatchEvent(new Event('submit'));
-    });
-  }
-
   // 로그아웃 버튼
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) {
