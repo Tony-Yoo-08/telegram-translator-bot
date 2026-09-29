@@ -195,5 +195,34 @@ class TestGroupLangSettings(unittest.TestCase):
                 db.GROUP_LANG_MAP_RAW = ""
 
 
+class TestEmergencyAdminIdsAndMenu(unittest.TestCase):
+    def test_parse_emergency_admin_ids(self):
+        import db
+        import os
+        orig = os.environ.get("EMERGENCY_ADMIN_ID")
+        try:
+            os.environ["EMERGENCY_ADMIN_ID"] = "186461338, 7402802661"
+            ids = db.parse_emergency_admin_ids()
+            self.assertIn(186461338, ids)
+            self.assertIn(7402802661, ids)
+        finally:
+            if orig is not None:
+                os.environ["EMERGENCY_ADMIN_ID"] = orig
+            else:
+                os.environ.pop("EMERGENCY_ADMIN_ID", None)
+
+    def test_build_groups_menu_special_chars(self):
+        import db
+        from bot import build_groups_menu
+        # 특수문자 대괄호 및 언더바 포함 그룹 등록
+        db.register_group(-1002718545586, "[EXECUTIVES] 중진_MALAWI LILIONGWE", is_forum=True)
+        text, markup = build_groups_menu()
+        self.assertIsNotNone(markup)
+        # HTML 이스케이프 또는 안전한 포함 확인
+        self.assertIn("[EXECUTIVES] 중진_MALAWI LILIONGWE", text)
+        self.assertIn("<code>-1002718545586</code>", text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
