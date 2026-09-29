@@ -7,8 +7,22 @@ from db import get_user_role, get_admin_ids
 
 logger = logging.getLogger(__name__)
 
-# S5: .env 비상 관리자 ID (설정 시 DB 손상/부트스트랩 초기화와 무관하게 영구 관리자로 인정)
-EMERGENCY_ADMIN_ID = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
+import re
+
+# S5: .env 비상 관리자 ID 목록 파싱 (쉼표 구분으로 복수 관리자 지원)
+def get_emergency_admin_ids() -> List[int]:
+    raw = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
+    if not raw:
+        return []
+    ids = []
+    for part in re.split(r"[,;\s]+", raw):
+        part = part.strip()
+        if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+            try:
+                ids.append(int(part))
+            except ValueError:
+                pass
+    return ids
 
 # S10: 레이트 리밋 메모리 저장소
 # user_id -> [timestamp, ...]
@@ -30,7 +44,7 @@ def is_admin(user_id: int) -> bool:
     """
     S5: 관리자 여부 확인 (DB 등록 관리자 또는 .env 비상 관리자)
     """
-    if EMERGENCY_ADMIN_ID and str(user_id) == EMERGENCY_ADMIN_ID:
+    if user_id in get_emergency_admin_ids():
         return True
     return get_user_role(user_id) == "admin"
 

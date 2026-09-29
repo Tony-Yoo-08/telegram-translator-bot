@@ -157,7 +157,8 @@ async def safe_reply(message, text: str, **kwargs):
     안전한 메시지 전송:
     1. 포럼 주제(Topic) 스레드 ID 보존
     2. 인용 답장(reply_text) 시도
-    3. 원본 메시지가 삭제된 경우 일반 메시지(send_message)로 자동 폴백
+    3. 마크다운/HTML 엔티티 파싱 오류 발생 시 자동 복구 및 서식 제거 재전송 (메시지 증발 방지)
+    4. 원본 메시지가 삭제된 경우 일반 메시지(send_message)로 자동 폴백
     """
     if not message:
         return None
@@ -173,6 +174,19 @@ async def safe_reply(message, text: str, **kwargs):
         return await message.reply_text(text, **kwargs)
     except Exception as e:
         err_str = str(e).lower()
+
+        # 1. 텔레그램 마크다운/HTML 파싱 에러인 경우 -> 서식 제거 후 즉시 재전송 (메시지 증발 방지)
+        if "parse" in err_str or "entity" in err_str or "can't find end" in err_str:
+            logger.warning(f"Telegram parse_mode failed ({e}). Falling back to plain text.")
+            kwargs.pop("parse_mode", None)
+            try:
+                clean_text = re.sub(r'<[^>]+>', '', text)
+                clean_text = clean_text.replace("**", "").replace("__", "").replace("`", "")
+                return await message.reply_text(clean_text, **kwargs)
+            except Exception as e_plain:
+                logger.error(f"Plain reply also failed: {e_plain}")
+
+        # 2. 원본 메시지 부재로 인한 reply 실패인 경우 -> send_message로 재시도
         if "not found" in err_str or "reply" in err_str:
             kwargs.pop("reply_to_message_id", None)
             kwargs.pop("quote", None)
@@ -528,15 +542,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         groups = db.get_all_groups()
         target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
         title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+        safe_title = html.escape(title)
 
         mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(conf.get("lang_mode"), conf.get("lang_mode", "all"))
         switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
 
         card_text = (
-            f"⚙️ **대화방 원격 설정: {title}**\n\n"
-            f"• 식별 ID: `{target_chat_id}`\n"
-            f"• 현재 언어 모드: **{mode_str}**\n"
-            f"• 번역 스위치: **{switch_str}**\n\n"
+            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
+            f"• 식별 ID: <code>{target_chat_id}</code>\n"
+            f"• 현재 언어 모드: <b>{mode_str}</b>\n"
+            f"• 번역 스위치: <b>{switch_str}</b>\n\n"
             "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
         )
         card_kb = [
@@ -550,7 +565,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
             ]
         ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
 
     elif action == "adm_lang":
         parts = data.split(":")
@@ -564,13 +579,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         groups = db.get_all_groups()
         target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
         title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+        safe_title = html.escape(title)
         switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
 
         card_text = (
-            f"⚙️ **대화방 원격 설정: {title}**\n\n"
-            f"• 식별 ID: `{target_chat_id}`\n"
-            f"• 현재 언어 모드: **{mode_str}** (변경 완료 ✅)\n"
-            f"• 번역 스위치: **{switch_str}**\n\n"
+            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
+            f"• 식별 ID: <code>{target_chat_id}</code>\n"
+            f"• 현재 언어 모드: <b>{mode_str}</b> (변경 완료 ✅)\n"
+            f"• 번역 스위치: <b>{switch_str}</b>\n\n"
             "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
         )
         card_kb = [
@@ -584,7 +600,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
             ]
         ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
 
     elif action == "adm_toggle":
         target_chat_id = int(data.split(":")[1])
@@ -596,14 +612,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         groups = db.get_all_groups()
         target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
         title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+        safe_title = html.escape(title)
         mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(conf.get("lang_mode"), conf.get("lang_mode", "all"))
         switch_str = "🟢 켜짐(ON)" if new_state else "⚪ 꺼짐(OFF)"
 
         card_text = (
-            f"⚙️ **대화방 원격 설정: {title}**\n\n"
-            f"• 식별 ID: `{target_chat_id}`\n"
-            f"• 현재 언어 모드: **{mode_str}**\n"
-            f"• 번역 스위치: **{switch_str}** (변경 완료 ✅)\n\n"
+            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
+            f"• 식별 ID: <code>{target_chat_id}</code>\n"
+            f"• 현재 언어 모드: <b>{mode_str}</b>\n"
+            f"• 번역 스위치: <b>{switch_str}</b> (변경 완료 ✅)\n\n"
             "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
         )
         card_kb = [
@@ -617,20 +634,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
             ]
         ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="Markdown")
+        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
 
     elif action == "adm_back":
         text, reply_markup = build_groups_menu()
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 def build_groups_menu():
-    """총괄 관리자용 대화방 목록 및 인라인 버튼 메뉴 생성"""
+    """총괄 관리자용 대화방 목록 및 인라인 버튼 메뉴 생성 (HTML 사용으로 특수문자 완벽 호환)"""
     groups = db.get_all_groups()
     if not groups:
         return "현재 봇이 연결된 그룹 대화방이 없습니다.", None
 
-    lines = ["📋 **봇 연결 그룹 대화방 목록 및 원격 제어**\n"]
+    lines = ["📋 <b>봇 연결 그룹 대화방 목록 및 원격 제어</b>\n"]
     keyboard = []
     mode_names = {"ko-en": "🇺🇸한영", "ko-vi": "🇻🇳한베", "all": "🌐3개국어"}
 
@@ -639,10 +656,11 @@ def build_groups_menu():
         forum_badge = " (포럼)" if g["is_forum"] else ""
         m_name = mode_names.get(g["lang_mode"], g["lang_mode"])
         sw_name = "ON" if g["is_enabled"] else "OFF"
+        safe_title = html.escape(g['title'] or '이름 없음')
         lines.append(
-            f"**{idx}. {g['title'] or '이름 없음'}**{forum_badge}\n"
-            f"• ID: `{g['chat_id']}` | 상태: {status_icon}\n"
-            f"• 설정: 언어 **`{m_name}`** | 번역: **`{sw_name}`**\n"
+            f"<b>{idx}. {safe_title}</b>{forum_badge}\n"
+            f"• ID: <code>{g['chat_id']}</code> | 상태: {status_icon}\n"
+            f"• 설정: 언어 <b><code>{m_name}</code></b> | 번역: <b><code>{sw_name}</code></b>\n"
         )
         title_btn = (g['title'] or f"방 {idx}")[:14]
         keyboard.append([
@@ -650,8 +668,8 @@ def build_groups_menu():
         ])
 
     lines.append(
-        "💡 **원격 관리**: 위 버튼을 누르면 해당 방의 언어(`한영/한베/3개국어`)와 번역 스위치를 즉시 변경할 수 있습니다.\n"
-        "• 명령어로 변경: `/set_lang [대화방ID] [all | ko-en | ko-vi]`"
+        "💡 <b>원격 관리</b>: 위 버튼을 누르면 해당 방의 언어(<code>한영/한베/3개국어</code>)와 번역 스위치를 즉시 변경할 수 있습니다.\n"
+        "• 명령어로 변경: <code>/set_lang [대화방ID] [all | ko-en | ko-vi]</code>"
     )
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
@@ -662,18 +680,42 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     message = update.effective_message
 
-    if not message or chat.type != "private" or not is_admin(user.id):
+    if not message:
+        return
+
+    if chat.type != "private":
+        await safe_reply(message, "🔒 이 명령어는 봇과의 1:1 개인 대화창(DM)에서만 사용 가능합니다.")
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(
+            message,
+            f"⚠️ <b>총괄 관리자 권한이 필요합니다.</b>\n\n"
+            f"• 현재 사용자 텔레그램 ID: <code>{user.id}</code>\n"
+            f"• 이 명령어는 등록된 총괄 관리자만 사용할 수 있습니다.\n"
+            f"• 본인을 총괄 관리자로 등록하시려면 Render 환경변수 <code>EMERGENCY_ADMIN_ID</code>에 위 ID(<code>{user.id}</code>)를 입력해 주세요.",
+            parse_mode="HTML"
+        )
         return
 
     text, reply_markup = build_groups_menu()
-    await safe_reply(message, text, reply_markup=reply_markup, parse_mode="Markdown")
+    await safe_reply(message, text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def cmd_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """총괄 관리자 전용: 특정 대화방의 번역 언어 모드 원격 변경"""
     user = update.effective_user
     message = update.effective_message
-    if not message or not is_admin(user.id):
+    if not message:
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(
+            message,
+            f"⚠️ 총괄 관리자 권한이 필요합니다. (본인 ID: `{user.id}`)\n"
+            f"Render 환경변수 `EMERGENCY_ADMIN_ID`에 본인 ID를 등록해 주세요.",
+            parse_mode="Markdown"
+        )
         return
 
     args = context.args or []
@@ -885,7 +927,16 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """총괄 관리자 전용: 전체 번역 일괄 중단 (점검 모드)"""
     user = update.effective_user
     message = update.effective_message
-    if not message or not is_admin(user.id):
+    if not message:
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(
+            message,
+            f"⚠️ **총괄 관리자 권한이 필요합니다.** (본인 ID: `{user.id}`)\n"
+            f"Render 환경변수 `EMERGENCY_ADMIN_ID`에 본인 ID를 등록해 주세요.",
+            parse_mode="Markdown"
+        )
         return
 
     args = context.args or []
@@ -928,7 +979,16 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """총괄 관리자 전용: 전체 번역 일괄 재개 (정상화)"""
     user = update.effective_user
     message = update.effective_message
-    if not message or not is_admin(user.id):
+    if not message:
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(
+            message,
+            f"⚠️ **총괄 관리자 권한이 필요합니다.** (본인 ID: `{user.id}`)\n"
+            f"Render 환경변수 `EMERGENCY_ADMIN_ID`에 본인 ID를 등록해 주세요.",
+            parse_mode="Markdown"
+        )
         return
 
     args = context.args or []
@@ -971,7 +1031,16 @@ async def cmd_sync_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """총괄 관리자 전용: 구글 스프레드시트 용어집 최신화 (1:1 DM 및 관리자 명령)"""
     user = update.effective_user
     message = update.effective_message
-    if not message or not is_admin(user.id):
+    if not message:
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(
+            message,
+            f"⚠️ **총괄 관리자 권한이 필요합니다.** (본인 ID: `{user.id}`)\n"
+            f"Render 환경변수 `EMERGENCY_ADMIN_ID`에 본인 ID를 등록해 주세요.",
+            parse_mode="Markdown"
+        )
         return
 
     wait_msg = await safe_reply(message, "⏳ 구글 스프레드시트에서 최신 용어집을 동기화하는 중입니다...")
@@ -1257,6 +1326,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not is_group and not is_approved_member(user.id):
+        await safe_reply(
+            message,
+            f"📊 **현재 상태**\n\n"
+            f"• 계정 권한: 🟡 미승인 계정\n"
+            f"• 본인 텔레그램 ID: `{user.id}`\n\n"
+            f"💡 총괄 관리자 권한이 필요하신 경우 Render의 `EMERGENCY_ADMIN_ID`에 본인 ID(`{user.id}`)를 등록해 주세요.",
+            parse_mode="Markdown"
+        )
         return
 
     conf = db.get_group_config(chat.id)
@@ -1309,6 +1386,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type == "private" and not is_approved_member(user.id):
+        text = (
+            f"👋 안녕하세요! 다국어 실시간 번역 봇입니다.\n\n"
+            f"현재 계정은 관리자 미등록 상태입니다.\n"
+            f"• 본인 텔레그램 ID: `{user.id}`\n\n"
+            f"총괄 관리자 권한이 필요하신 경우 Render 환경변수의 `EMERGENCY_ADMIN_ID`에 위 ID(`{user.id}`)를 등록해 주세요."
+        )
+        await safe_reply(message, text, parse_mode="Markdown")
         return
 
     admin_extra = ""
@@ -1422,28 +1506,24 @@ async def handle_custom_or_korean_command(update: Update, context: ContextTypes.
             await cmd_start(update, context)
             return True
     elif cmd_name in ["sync_glossary", "syncglossary", "용어집", "용어집갱신", "용어집동기화"]:
-        if is_admin(update.effective_user.id):
-            await cmd_sync_glossary(update, context)
-            return True
+        await cmd_sync_glossary(update, context)
+        return True
     elif cmd_name in ["pause", "점검시작", "일괄정지", "점검", "정지"]:
-        if is_admin(update.effective_user.id):
-            context.args = cmd_args
-            await cmd_pause(update, context)
-            return True
+        context.args = cmd_args
+        await cmd_pause(update, context)
+        return True
     elif cmd_name in ["resume", "점검완료", "점검종료", "일괄재개", "재개"]:
-        if is_admin(update.effective_user.id):
-            context.args = cmd_args
-            await cmd_resume(update, context)
-            return True
+        context.args = cmd_args
+        await cmd_resume(update, context)
+        return True
     elif cmd_name in ["groups", "대화방", "그룹목록", "방목록", "대화방목록"]:
-        if is_admin(update.effective_user.id):
-            await cmd_groups(update, context)
-            return True
+        context.args = cmd_args
+        await cmd_groups(update, context)
+        return True
     elif cmd_name in ["set_lang", "setlang", "방언어", "방언어설정", "언어설정"]:
-        if is_admin(update.effective_user.id):
-            context.args = cmd_args
-            await cmd_set_lang(update, context)
-            return True
+        context.args = cmd_args
+        await cmd_set_lang(update, context)
+        return True
     elif cmd_name in ["allow_group", "allowgroup", "방승인", "그룹승인", "활성화"]:
         await cmd_allow_group(update, context)
         return True

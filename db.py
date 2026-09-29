@@ -12,6 +12,23 @@ AUTO_APPROVE_GROUPS = os.getenv("AUTO_APPROVE_GROUPS", "true").lower() in ["true
 GROUP_LANG_MAP_RAW = os.getenv("GROUP_LANG_MAP", "").strip()
 
 
+def parse_emergency_admin_ids() -> List[int]:
+    """환경변수 EMERGENCY_ADMIN_ID 파싱 (쉼표 구분으로 복수 관리자 지원)"""
+    raw = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
+    if not raw:
+        return []
+    import re
+    ids = []
+    for part in re.split(r"[,;\s]+", raw):
+        part = part.strip()
+        if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
+            try:
+                ids.append(int(part))
+            except ValueError:
+                pass
+    return ids
+
+
 def parse_group_lang_map() -> Dict[int, str]:
     """환경변수 GROUP_LANG_MAP 파싱 (JSON 또는 쉼표 구분 문자열 지원)"""
     if not GROUP_LANG_MAP_RAW:
@@ -86,21 +103,17 @@ def init_db():
             )
         """)
         # S5: .env 비상 관리자 자동 부트스트랩 (서버 재기동 시 데이터 보존)
-        if EMERGENCY_ADMIN_ID:
-            try:
-                e_id = int(EMERGENCY_ADMIN_ID)
-                cursor.execute("""
-                    INSERT INTO users (user_id, role, username)
-                    VALUES (?, 'admin', 'MasterAdmin')
-                    ON CONFLICT(user_id) DO UPDATE SET role = 'admin'
-                """, (e_id,))
-                cursor.execute("""
-                    INSERT INTO system_flags (key, value)
-                    VALUES ('admin_initialized', 'true')
-                    ON CONFLICT(key) DO UPDATE SET value = 'true'
-                """)
-            except ValueError:
-                pass
+        for e_id in parse_emergency_admin_ids():
+            cursor.execute("""
+                INSERT INTO users (user_id, role, username)
+                VALUES (?, 'admin', 'MasterAdmin')
+                ON CONFLICT(user_id) DO UPDATE SET role = 'admin'
+            """, (e_id,))
+            cursor.execute("""
+                INSERT INTO system_flags (key, value)
+                VALUES ('admin_initialized', 'true')
+                ON CONFLICT(key) DO UPDATE SET value = 'true'
+            """)
 
         # 환경변수 GROUP_LANG_MAP 영구 설정 동기화
         env_map = parse_group_lang_map()
@@ -194,13 +207,9 @@ def get_admin_ids() -> List[int]:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id FROM users WHERE role = 'admin'")
         ids = [row["user_id"] for row in cursor.fetchall()]
-        if EMERGENCY_ADMIN_ID:
-            try:
-                e_id = int(EMERGENCY_ADMIN_ID)
-                if e_id not in ids:
-                    ids.append(e_id)
-            except ValueError:
-                pass
+        for e_id in parse_emergency_admin_ids():
+            if e_id not in ids:
+                ids.append(e_id)
         return ids
 
 
