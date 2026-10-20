@@ -240,65 +240,18 @@ async def send_command_feedback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
-    delete_trigger: bool = True,
+    delete_trigger: bool = False,
     **kwargs
 ):
     """
-    대화방 청결 유지를 위한 스마트 명령어 피드백 전송:
-    1. 1:1 개인 대화(DM)에서 실행된 경우: 개인 대화창에 정상 회신
-    2. 그룹 대화방에서 실행된 경우:
-       - 실행한 관리자의 1:1 봇 개인 대화(DM)로 결과 전송
-       - DM 전송 성공 시에만 그룹의 원본 명령어 메시지 삭제 (메시지 증발 방지)
-       - 관리자가 봇과 1:1 대화를 시작하지 않아 DM 실패 시, 그룹에 안내 전송
+    명령어를 입력한 바로 그 대화방(개인 DM 또는 공용 그룹/포럼 토픽)으로 직접 피드백 전송
     """
-    chat = update.effective_chat
     message = update.effective_message
-    user = update.effective_user
-
     if not message:
         return None
 
-    # 1. 1:1 개인 대화(DM)인 경우
-    if not chat or chat.type == "private":
-        return await safe_reply(message, text, **kwargs)
-
-    # 2. 그룹 대화방인 경우
-    group_title = (chat.title or "그룹").replace("[", "(").replace("]", ")")
-    thread_info = ""
-    thread_id = getattr(message, "message_thread_id", None)
-    if getattr(message, "is_topic_message", False) and thread_id:
-        thread_info = f" (토픽 ID: {thread_id})"
-
-    dm_text = f"🏢 [{group_title}{thread_info}] 관리 안내\n\n{text}"
-
-    dm_sent = False
-    try:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=dm_text,
-            **kwargs
-        )
-        logger.info(f"Command feedback sent secretly to user {user.id} in 1:1 DM.")
-        dm_sent = True
-    except Exception as e:
-        logger.warning(f"Could not send DM to user {user.id} (user hasn't /started bot in DM): {e}")
-
-    # DM 전송에 성공한 경우에만 그룹의 원본 명령어 삭제 (메시지 증발 방지)
-    if dm_sent:
-        if delete_trigger:
-            try:
-                await message.delete()
-            except Exception as e:
-                logger.debug(f"Could not delete command trigger message: {e}")
-        return None
-
-    # 관리자가 봇과 1:1 대화를 아직 튼 적이 없어 DM이 차단된 경우 그룹으로 폴백 안내
-    fallback_text = (
-        f"{text}\n\n"
-        f"*(💡 대화방 청결 팁: 봇과의 1:1 대화창에서 `/start`를 한 번 눌러두시면, "
-        f"다음부터는 대화방을 어지럽히지 않고 관리자 개인 대화창으로 조용히 전송됩니다!)*"
-    )
-    return await safe_reply(message, fallback_text, **kwargs)
+    # 명령어가 입력된 바로 그 대화방 및 토픽 스레드로 직접 답장 전송
+    return await safe_reply(message, text, **kwargs)
 
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
