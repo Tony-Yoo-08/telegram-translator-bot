@@ -11,6 +11,8 @@ class TestSecurityCompliantTranslator(unittest.TestCase):
         self.assertEqual(detect_source_language("안녕하세요! 반갑습니다."), "KO")
         self.assertEqual(detect_source_language("Xin chào tất cả mọi người"), "VI")
         self.assertEqual(detect_source_language("Hello everyone! Have a great day."), "EN")
+        self.assertEqual(detect_source_language("你好！欢迎大家。"), "ZH")
+        self.assertEqual(detect_source_language("¡Hola a todos! ¿Cómo están?"), "ES")
 
     def test_target_languages_all_mode(self):
         targets = get_translation_targets("KO", mode="all")
@@ -22,6 +24,21 @@ class TestSecurityCompliantTranslator(unittest.TestCase):
         targets = get_translation_targets("EN", mode="all")
         self.assertEqual(targets, [("ko", "🇰🇷"), ("vi", "🇻🇳")])
 
+    def test_target_languages_chinese_and_spanish_modes(self):
+        # 한-중 모드 테스트
+        targets_zh_ko = get_translation_targets("KO", mode="ko-zh")
+        self.assertEqual(targets_zh_ko, [("zh-CN", "🇨🇳")])
+
+        targets_zh_in = get_translation_targets("ZH", mode="ko-zh")
+        self.assertEqual(targets_zh_in, [("ko", "🇰🇷")])
+
+        # 한-스 모드 테스트
+        targets_es_ko = get_translation_targets("KO", mode="ko-es")
+        self.assertEqual(targets_es_ko, [("es", "🇪🇸")])
+
+        targets_es_in = get_translation_targets("ES", mode="ko-es")
+        self.assertEqual(targets_es_in, [("ko", "🇰🇷")])
+
     def test_short_reaction_filtering(self):
         self.assertTrue(is_trivial_reaction("아멘"))
         self.assertTrue(is_trivial_reaction("Amen 🙏"))
@@ -29,11 +46,15 @@ class TestSecurityCompliantTranslator(unittest.TestCase):
         self.assertTrue(is_trivial_reaction("vâng"))
         self.assertTrue(is_trivial_reaction("ok"))
         self.assertTrue(is_trivial_reaction("네~"))
+        self.assertTrue(is_trivial_reaction("好的"))
+        self.assertTrue(is_trivial_reaction("gracias"))
 
     def test_genuine_conversation_retained(self):
         self.assertFalse(is_trivial_reaction("아멘! 오늘 안내 공지 전달드립니다."))
         self.assertFalse(is_trivial_reaction("Xin chào! Hôm nay có thông báo gì không?"))
         self.assertFalse(is_trivial_reaction("Please review the attached schedule."))
+        self.assertFalse(is_trivial_reaction("你好！今天下午有会议吗？"))
+        self.assertFalse(is_trivial_reaction("Hola, por favor revise el documento adjunto."))
 
 
 class TestMessageEditAndReactionCache(unittest.TestCase):
@@ -223,6 +244,42 @@ class TestEmergencyAdminIdsAndMenu(unittest.TestCase):
         self.assertIn("<code>-1002718545586</code>", text)
 
 
+class TestGlossaryManager(unittest.TestCase):
+    def setUp(self):
+        from glossary import GlossaryManager
+        self.mgr = GlossaryManager()
+        # 테스트용 가상 용어 수동 주입
+        self.mgr.terms = {
+            "en": [("총회장님", "Chairman"), ("총회장", "Chairman"), ("섭외부", "Liaison Department")],
+            "vi": [("총회장님", "Chủ tịch"), ("총회장", "Chủ tịch"), ("섭외부", "Bộ phận Ngoại giao")],
+            "zh": [("총회장님", "总会长"), ("총회장", "总会长"), ("섭외부", "涉外部")],
+            "es": [("총회장님", "Presidente"), ("총회장", "Presidente"), ("섭외부", "Departamento de Enlace")]
+        }
+        self.mgr.loaded_count = 12
+
+    def test_apply_glossary_en_case_correction(self):
+        source = "총회장님께서 회의를 주관하셨습니다."
+        # 번역기가 소문자 'chairman'으로 번역한 경우 공식 'Chairman'으로 교정
+        translated = "The chairman presided over the meeting."
+        result = self.mgr.apply_glossary(translated, "en", source_text=source)
+        self.assertIn("Chairman", result)
+
+    def test_apply_glossary_particle_matching(self):
+        # 조사가 붙은 경우("총회장에", "섭외부를") 감지 확인
+        source = "섭외부를 방문하였습니다."
+        translated = "I visited the liaison department."
+        result = self.mgr.apply_glossary(translated, "en", source_text=source)
+        self.assertIn("Liaison Department", result)
+
+    def test_apply_glossary_word_boundary_safety(self):
+        # '과'나 다른 단어의 일부가 잘못 치환되지 않는지 확인
+        source = "사과를 맛있게 먹었습니다."
+        translated = "I ate an apple deliciously."
+        result = self.mgr.apply_glossary(translated, "en", source_text=source)
+        self.assertEqual(result, translated)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

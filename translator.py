@@ -22,6 +22,12 @@ LANG_SPECIFIC_CHAR_PATTERN = re.compile(
     r'ÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]'
 )
 
+# 중국어 한자 정규식 (CJK 통합 한자)
+CHINESE_CHAR_PATTERN = re.compile(r'[\u4e00-\u9fff]')
+
+# 스페인어 고유 문자 정규식 (역물음표, 역느낌표, 악센트 모음, ñ)
+SPANISH_CHAR_PATTERN = re.compile(r'[áéíóúüñ¿¡ÁÉÍÓÚÜÑ]')
+
 # 단답형 감탄사 및 빈번한 단문 리액션 필터링 목록 (S12 준수: 중립적 변수명 및 주석)
 FILTERED_SHORT_RESPONSES = {
     # 그룹 1: 단문 호응어
@@ -42,8 +48,15 @@ FILTERED_SHORT_RESPONSES = {
     "ty", "k", "gg", "lol", "nvm", "np", "pls", "plz", "sry", "sorry",
     "good", "great", "nice", "cool", "wow", "omg", "congrats",
 
-    # 그룹 4: 기타 언어 단답
-    "dạ", "vâng", "cảm ơn", "cam on", "oke"
+    # 그룹 4: 베트남어 단답
+    "dạ", "vâng", "cảm ơn", "cam on", "oke",
+
+    # 그룹 5: 중국어 단답
+    "好的", "收到", "谢谢", "谢谢你", "多谢", "感恩", "阿门", "阿們",
+    "哈利路亚", "哈利路亞", "赞美", "讚美", "你好", "再见", "对", "是的",
+
+    # 그룹 6: 스페인어 단답
+    "si", "sí", "gracias", "hola", "adios", "adiós", "bien", "amén", "bueno", "vale"
 }
 
 # 단순 반복 패턴 정규식
@@ -91,22 +104,33 @@ def detect_source_language(text: str) -> Optional[str]:
         return None
 
     # 단순 기호/숫자/이모지만 있는 경우 제외
-    if not re.search(r'[가-힣a-zA-Z]', cleaned) and not LANG_SPECIFIC_CHAR_PATTERN.search(cleaned):
+    if (not re.search(r'[가-힣a-zA-Z]', cleaned) 
+            and not LANG_SPECIFIC_CHAR_PATTERN.search(cleaned)
+            and not CHINESE_CHAR_PATTERN.search(cleaned)
+            and not SPANISH_CHAR_PATTERN.search(cleaned)):
         return None
 
     # 단순 리액션 필터링
     if is_trivial_reaction(cleaned):
         return None
 
-    # 1. 한국어 감지
+    # 1. 한국어 감지 (한글 우선)
     if re.search(r'[가-힣]', cleaned):
         return "KO"
 
-    # 2. 베트남어 문자 감지
+    # 2. 중국어 한자 감지 (한글 없는 한자 문장)
+    if CHINESE_CHAR_PATTERN.search(cleaned):
+        return "ZH"
+
+    # 3. 베트남어 문자 감지
     if LANG_SPECIFIC_CHAR_PATTERN.search(cleaned):
         return "VI"
 
-    # 3. 영문 문자 감지
+    # 4. 스페인어 고유 문자 감지
+    if SPANISH_CHAR_PATTERN.search(cleaned):
+        return "ES"
+
+    # 5. 영문/라틴 문자 감지
     if re.search(r'[a-zA-Z]', cleaned):
         return "EN"
 
@@ -120,14 +144,28 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
     if mode == "ko-en":
         if source_lang == "KO":
             return [("en", "🇺🇸")]
-        elif source_lang in ["EN", "VI"]:
+        elif source_lang in ["EN", "VI", "ZH", "ES"]:
             return [("ko", "🇰🇷")]
         return []
 
     elif mode == "ko-vi":
         if source_lang == "KO":
             return [("vi", "🇻🇳")]
-        elif source_lang in ["VI", "EN"]:
+        elif source_lang in ["VI", "EN", "ZH", "ES"]:
+            return [("ko", "🇰🇷")]
+        return []
+
+    elif mode == "ko-zh":
+        if source_lang == "KO":
+            return [("zh-CN", "🇨🇳")]
+        elif source_lang in ["ZH", "EN", "VI", "ES"]:
+            return [("ko", "🇰🇷")]
+        return []
+
+    elif mode == "ko-es":
+        if source_lang == "KO":
+            return [("es", "🇪🇸")]
+        elif source_lang in ["ES", "EN", "VI", "ZH"]:
             return [("ko", "🇰🇷")]
         return []
 
@@ -136,7 +174,7 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
         return [("en", "🇺🇸"), ("vi", "🇻🇳")]
     elif source_lang == "VI":
         return [("ko", "🇰🇷")]
-    elif source_lang == "EN":
+    elif source_lang in ["EN", "ZH", "ES"]:
         return [("ko", "🇰🇷"), ("vi", "🇻🇳")]
 
     return []
@@ -219,6 +257,12 @@ def determine_translation_plan(
             # 이미 영문이 제공되었으므로 영어는 번역하지 않고 베트남어만 번역
             ko_section = extract_korean_section(text)
             return ([("vi", "🇻🇳")], ko_section)
+        elif mode == "ko-zh":
+            ko_section = extract_korean_section(text)
+            return ([("zh-CN", "🇨🇳")], ko_section)
+        elif mode == "ko-es":
+            ko_section = extract_korean_section(text)
+            return ([("es", "🇪🇸")], ko_section)
         elif mode == "ko-en":
             # 한-영 모드 방에서는 한글과 영어가 이미 다 있으므로 번역 불필요 (스킵)
             return ([], "")
@@ -228,6 +272,10 @@ def determine_translation_plan(
         if mode in ["all", "ko-vi"]:
             # 사진에 한글이 있고 캡션에 영어가 있으므로 베트남어만 번역
             return ([("vi", "🇻🇳")], text)
+        elif mode == "ko-zh":
+            return ([("zh-CN", "🇨🇳")], text)
+        elif mode == "ko-es":
+            return ([("es", "🇪🇸")], text)
         elif mode == "ko-en":
             # 한-영 모드 방에서는 이미 사진(한글)과 캡션(영어)이 있으므로 번역 불필요 (스킵)
             return ([], "")
@@ -322,11 +370,18 @@ class UnifiedTranslationService:
             except Exception as e:
                 logger.warning(f"Glossary pre-processing error: {e}")
 
+        deepl_lang_map = {
+            "en": "EN-US",
+            "ko": "KO",
+            "es": "ES",
+            "zh": "ZH",
+            "zh-cn": "ZH",
+        }
         raw_result = None
         if target_lang == "vi":
             raw_result = self._translate_free(source_to_translate, "vi")
-        elif self._deepl_translator and target_lang in ["en", "ko"]:
-            deepl_target = "EN-US" if target_lang == "en" else "KO"
+        elif self._deepl_translator and target_lang.lower() in deepl_lang_map:
+            deepl_target = deepl_lang_map[target_lang.lower()]
             try:
                 result = self._deepl_translator.translate_text(source_to_translate, target_lang=deepl_target)
                 raw_result = result.text
