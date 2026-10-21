@@ -3,7 +3,7 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Set, Dict
 import deepl
 from deep_translator import GoogleTranslator
 
@@ -137,45 +137,93 @@ def detect_source_language(text: str) -> Optional[str]:
     return None
 
 
+# 5개국어 지원 정의 (한국어 기준 4개 외국어 타겟)
+SUPPORTED_TARGET_LANGUAGES: Dict[str, Dict[str, str]] = {
+    "en": {"code": "en", "target_code": "en", "flag": "🇺🇸", "name": "영어"},
+    "vi": {"code": "vi", "target_code": "vi", "flag": "🇻🇳", "name": "베트남어"},
+    "zh": {"code": "zh", "target_code": "zh-CN", "flag": "🇨🇳", "name": "중국어"},
+    "es": {"code": "es", "target_code": "es", "flag": "🇪🇸", "name": "스페인어"},
+}
+ORDERED_TARGET_LANGS = ["en", "vi", "zh", "es"]
+
+
+def parse_active_languages(mode: str) -> Set[str]:
+    """
+    모드 문자열을 분석하여 활성화된 외국어 대상 식별자 집합(set) 반환
+    - 'all', '5' -> {'en', 'vi', 'zh', 'es'} (5개국어 전체 번역)
+    - 'ko-en', 'en' -> {'en'}
+    - 'ko-vi', 'vi' -> {'vi'}
+    - 'ko-zh', 'zh' -> {'zh'}
+    - 'ko-es', 'es' -> {'es'}
+    - 'en,vi', 'en+zh', 'en,vi,zh,es' 등 임의의 다중 선택 조합 완벽 지원
+    """
+    if not mode:
+        return set(ORDERED_TARGET_LANGS)
+
+    m = mode.strip().lower()
+    if m in ["all", "5", "5개국어", "전체", "모두"]:
+        return set(ORDERED_TARGET_LANGS)
+    if m in ["3", "3개국어"]:
+        # 과거 3개국어 하위 호환
+        return {"en", "vi"}
+    if m in ["ko-en", "en", "영어"]:
+        return {"en"}
+    if m in ["ko-vi", "vi", "베트남어"]:
+        return {"vi"}
+    if m in ["ko-zh", "zh", "중국어"]:
+        return {"zh"}
+    if m in ["ko-es", "es", "스페인어"]:
+        return {"es"}
+
+    tokens = re.split(r'[,+\s/]+', m)
+    result: Set[str] = set()
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok in ["en", "영어", "ko-en", "us"]:
+            result.add("en")
+        elif tok in ["vi", "베트남어", "ko-vi", "vn"]:
+            result.add("vi")
+        elif tok in ["zh", "zh-cn", "중국어", "ko-zh", "cn"]:
+            result.add("zh")
+        elif tok in ["es", "스페인어", "ko-es"]:
+            result.add("es")
+        elif tok in ["all", "전체", "5개국어", "5"]:
+            return set(ORDERED_TARGET_LANGS)
+
+    return result if result else set(ORDERED_TARGET_LANGS)
+
+
 def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[str, str]]:
-    """모드별 번역 대상 언어 및 심볼 반환"""
-    mode = mode.lower()
-
-    if mode == "ko-en":
-        if source_lang == "KO":
-            return [("en", "🇺🇸")]
-        elif source_lang in ["EN", "VI", "ZH", "ES"]:
-            return [("ko", "🇰🇷")]
+    """
+    모드별(단일/다중/5개국어 전체) 번역 대상 언어 및 심볼 반환
+    - source_lang == 'KO': 활성화된 모든 대상 외국어(선택된 언어들) 동시 번역 반환
+    - source_lang == 'EN': 한국어([('ko', '🇰🇷')]) + 다른 활성화된 외국어(베트남, 중국, 스페인 등) 함께 번역
+    - source_lang in ['VI', 'ZH', 'ES']: 한국어([('ko', '🇰🇷')])로 번역
+    """
+    active = parse_active_languages(mode)
+    if not active:
         return []
 
-    elif mode == "ko-vi":
-        if source_lang == "KO":
-            return [("vi", "🇻🇳")]
-        elif source_lang in ["VI", "EN", "ZH", "ES"]:
-            return [("ko", "🇰🇷")]
-        return []
-
-    elif mode == "ko-zh":
-        if source_lang == "KO":
-            return [("zh-CN", "🇨🇳")]
-        elif source_lang in ["ZH", "EN", "VI", "ES"]:
-            return [("ko", "🇰🇷")]
-        return []
-
-    elif mode == "ko-es":
-        if source_lang == "KO":
-            return [("es", "🇪🇸")]
-        elif source_lang in ["ES", "EN", "VI", "ZH"]:
-            return [("ko", "🇰🇷")]
-        return []
-
-    # mode == 'all'
     if source_lang == "KO":
-        return [("en", "🇺🇸"), ("vi", "🇻🇳")]
-    elif source_lang == "VI":
+        return [
+            (SUPPORTED_TARGET_LANGUAGES[k]["target_code"], SUPPORTED_TARGET_LANGUAGES[k]["flag"])
+            for k in ORDERED_TARGET_LANGS
+            if k in active
+        ]
+
+    src = source_lang.lower() if source_lang else ""
+
+    if src == "en":
+        targets: List[Tuple[str, str]] = [("ko", "🇰🇷")]
+        for k in ["vi", "zh", "es"]:
+            if k in active:
+                targets.append((SUPPORTED_TARGET_LANGUAGES[k]["target_code"], SUPPORTED_TARGET_LANGUAGES[k]["flag"]))
+        return targets
+
+    elif src in ["vi", "zh", "es"]:
         return [("ko", "🇰🇷")]
-    elif source_lang in ["EN", "ZH", "ES"]:
-        return [("ko", "🇰🇷"), ("vi", "🇻🇳")]
 
     return []
 
@@ -249,36 +297,35 @@ def determine_translation_plan(
     - targets: [(lang_code, flag_emoji), ...]
     - text_to_translate: 실제로 번역기에 전달할 텍스트
     """
-    mode = mode.lower()
+    active = parse_active_languages(mode)
+    if not active:
+        return ([], "")
 
     # 1. 유형 1: 한글+영어 동시 수록된 텍스트 어록
     if is_bilingual_ko_en(text):
-        if mode in ["all", "ko-vi"]:
-            # 이미 영문이 제공되었으므로 영어는 번역하지 않고 베트남어만 번역
+        # 이미 영문이 본문에 제공되었으므로 영어는 번역에서 제외하고 나머지 활성 외국어 번역
+        remaining_langs = [k for k in ["vi", "zh", "es"] if k in active]
+        if remaining_langs:
             ko_section = extract_korean_section(text)
-            return ([("vi", "🇻🇳")], ko_section)
-        elif mode == "ko-zh":
-            ko_section = extract_korean_section(text)
-            return ([("zh-CN", "🇨🇳")], ko_section)
-        elif mode == "ko-es":
-            ko_section = extract_korean_section(text)
-            return ([("es", "🇪🇸")], ko_section)
-        elif mode == "ko-en":
-            # 한-영 모드 방에서는 한글과 영어가 이미 다 있으므로 번역 불필요 (스킵)
-            return ([], "")
+            targets = [
+                (SUPPORTED_TARGET_LANGUAGES[k]["target_code"], SUPPORTED_TARGET_LANGUAGES[k]["flag"])
+                for k in remaining_langs
+            ]
+            return (targets, ko_section)
+        # 영어 외에 다른 활성 언어가 없는 경우(예: 한-영 전용 방) 번역 불필요 (스킵)
+        return ([], "")
 
     # 2. 유형 2: 사진(한글 이미지) + 영문 캡션 어록
     if is_image_quote_caption(text, has_photo=has_photo):
-        if mode in ["all", "ko-vi"]:
-            # 사진에 한글이 있고 캡션에 영어가 있으므로 베트남어만 번역
-            return ([("vi", "🇻🇳")], text)
-        elif mode == "ko-zh":
-            return ([("zh-CN", "🇨🇳")], text)
-        elif mode == "ko-es":
-            return ([("es", "🇪🇸")], text)
-        elif mode == "ko-en":
-            # 한-영 모드 방에서는 이미 사진(한글)과 캡션(영어)이 있으므로 번역 불필요 (스킵)
-            return ([], "")
+        # 사진에 한글이 있고 캡션에 영어가 있으므로 영어 제외 나머지 활성 외국어 번역
+        remaining_langs = [k for k in ["vi", "zh", "es"] if k in active]
+        if remaining_langs:
+            targets = [
+                (SUPPORTED_TARGET_LANGUAGES[k]["target_code"], SUPPORTED_TARGET_LANGUAGES[k]["flag"])
+                for k in remaining_langs
+            ]
+            return (targets, text)
+        return ([], "")
 
     # 3. 일반 메시지 처리
     source_lang = detect_source_language(text)

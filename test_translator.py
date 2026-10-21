@@ -15,14 +15,38 @@ class TestSecurityCompliantTranslator(unittest.TestCase):
         self.assertEqual(detect_source_language("¡Hola a todos! ¿Cómo están?"), "ES")
 
     def test_target_languages_all_mode(self):
+        # 5개국어 전체 모드 (Korean ↔ English, Vietnamese, Chinese, Spanish)
         targets = get_translation_targets("KO", mode="all")
-        self.assertEqual(targets, [("en", "🇺🇸"), ("vi", "🇻🇳")])
+        self.assertEqual(targets, [("en", "🇺🇸"), ("vi", "🇻🇳"), ("zh-CN", "🇨🇳"), ("es", "🇪🇸")])
 
         targets = get_translation_targets("VI", mode="all")
         self.assertEqual(targets, [("ko", "🇰🇷")])
 
+        targets = get_translation_targets("ZH", mode="all")
+        self.assertEqual(targets, [("ko", "🇰🇷")])
+
+        targets = get_translation_targets("ES", mode="all")
+        self.assertEqual(targets, [("ko", "🇰🇷")])
+
         targets = get_translation_targets("EN", mode="all")
-        self.assertEqual(targets, [("ko", "🇰🇷"), ("vi", "🇻🇳")])
+        self.assertEqual(targets, [("ko", "🇰🇷"), ("vi", "🇻🇳"), ("zh-CN", "🇨🇳"), ("es", "🇪🇸")])
+
+    def test_target_languages_multi_select_combinations(self):
+        # 영어 + 베트남어 다중 선택 모드
+        targets_en_vi = get_translation_targets("KO", mode="en,vi")
+        self.assertEqual(targets_en_vi, [("en", "🇺🇸"), ("vi", "🇻🇳")])
+
+        # 영어 + 중국어 다중 선택 모드
+        targets_en_zh = get_translation_targets("KO", mode="en,zh")
+        self.assertEqual(targets_en_zh, [("en", "🇺🇸"), ("zh-CN", "🇨🇳")])
+
+        # 베트남어 + 스페인어 다중 선택 모드
+        targets_vi_es = get_translation_targets("KO", mode="vi,es")
+        self.assertEqual(targets_vi_es, [("vi", "🇻🇳"), ("es", "🇪🇸")])
+
+        # 3개 외국어 동시 선택 모드 (영어 + 베트남어 + 중국어)
+        targets_3langs = get_translation_targets("KO", mode="en,vi,zh")
+        self.assertEqual(targets_3langs, [("en", "🇺🇸"), ("vi", "🇻🇳"), ("zh-CN", "🇨🇳")])
 
     def test_target_languages_chinese_and_spanish_modes(self):
         # 한-중 모드 테스트
@@ -277,6 +301,101 @@ class TestGlossaryManager(unittest.TestCase):
         translated = "I ate an apple deliciously."
         result = self.mgr.apply_glossary(translated, "en", source_text=source)
         self.assertEqual(result, translated)
+
+
+class TestMessageReactionAndEditPersistence(unittest.TestCase):
+    def setUp(self):
+        import db
+        import bot
+        self.db = db
+        self.bot = bot
+        self.db.init_db()
+        # 테스트용 chat_id, message_id
+        self.test_chat_id = -999888777
+        self.test_msg_id = 12345
+        self.test_user_id = 55555
+
+    def tearDown(self):
+        # 테스트 데이터 정리
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM message_translations WHERE chat_id = ?", (self.test_chat_id,))
+            conn.commit()
+        # 메모리 캐시 정리
+        self.bot.PROCESSED_MESSAGE_TEXTS.pop((self.test_chat_id, self.test_msg_id), None)
+        self.bot.BOT_TRANSLATION_REPLIES.pop((self.test_chat_id, self.test_msg_id), None)
+
+    def test_db_persistence_and_cache_reload(self):
+        """서버 재시작/패치 후에도 DB를 통해 이전 텍스트와 번역 메시지 ID가 복원되는지 검증"""
+        orig_text = "안녕하세요 회의 시작합니다."
+        reply_id = 98765
+
+        # 1. 메시지 번역 정보 기록
+        self.bot.record_message_cache(
+            self.test_chat_id, self.test_msg_id, orig_text, reply_id, user_id=self.test_user_id
+        )
+
+        # 2. 패치/재시작 시뮬레이션: 메모리 캐시 완전 삭제
+        self.bot.PROCESSED_MESSAGE_TEXTS.clear()
+        self.bot.BOT_TRANSLATION_REPLIES.clear()
+        self.assertEqual(len(self.bot.PROCESSED_MESSAGE_TEXTS), 0)
+        self.assertEqual(len(self.bot.BOT_TRANSLATION_REPLIES), 0)
+
+        # 3. L2 DB로부터 캐시 자동 복원 조회 검증
+        cached_text = self.bot.get_cached_message_text(self.test_chat_id, self.test_msg_id)
+        cached_reply_id = self.bot.get_bot_reply_id(self.test_chat_id, self.test_msg_id)
+
+        self.assertEqual(cached_text, orig_text)
+        self.assertEqual(cached_reply_id, reply_id)
+
+        # 복원 후 L1 캐시에도 다시 적재되었는지 확인
+        self.assertIn((self.test_chat_id, self.test_msg_id), self.bot.PROCESSED_MESSAGE_TEXTS)
+        self.assertIn((self.test_chat_id, self.test_msg_id), self.bot.BOT_TRANSLATION_REPLIES)
+
+    def test_reaction_skip_logic(self):
+        """메시지에 반응(이모지 등)만 달려서 텍스트가 동일할 때 스킵 조건 검증"""
+        orig_text = "점심 메뉴 정하셨나요?"
+        self.bot.record_message_cache(self.test_chat_id, self.test_msg_id, orig_text, 11111)
+
+        # 패치 후 메모리 초기화 상태 가정
+        self.bot.PROCESSED_MESSAGE_TEXTS.clear()
+
+        # 반응이 달려서 edited_message가 왔지만 텍스트는 그대로인 상황
+        current_text = orig_text
+        previous_text = self.bot.get_cached_message_text(self.test_chat_id, self.test_msg_id)
+
+        self.assertIsNotNone(previous_text)
+        self.assertEqual(previous_text, current_text)  # 텍스트 동일 -> 스킵 판별 성공
+
+    def test_message_edit_detection_and_reply_id_retrieval(self):
+        """메시지 내용이 실제로 수정되었을 때 변경 감지 및 기존 답장 ID 조회 검증"""
+        orig_text = "오늘 2시 회의"
+        reply_id = 22222
+        self.bot.record_message_cache(self.test_chat_id, self.test_msg_id, orig_text, reply_id)
+
+        # 패치 후 메모리 초기화 상태 가정
+        self.bot.PROCESSED_MESSAGE_TEXTS.clear()
+        self.bot.BOT_TRANSLATION_REPLIES.clear()
+
+        # 사용자가 텍스트를 "오늘 3시 회의"로 수정
+        new_text = "오늘 3시 회의"
+        previous_text = self.bot.get_cached_message_text(self.test_chat_id, self.test_msg_id)
+        prev_reply_id = self.bot.get_bot_reply_id(self.test_chat_id, self.test_msg_id)
+
+        self.assertIsNotNone(previous_text)
+        self.assertNotEqual(previous_text, new_text)  # 텍스트 변경 감지 -> 수정(Edit) 모드
+        self.assertEqual(prev_reply_id, reply_id)    # 기존 출력된 번역 메시지 ID 정상 획득
+
+        # 수정 후 캐시 갱신
+        self.bot.record_message_cache(self.test_chat_id, self.test_msg_id, new_text, prev_reply_id)
+        self.assertEqual(self.bot.get_cached_message_text(self.test_chat_id, self.test_msg_id), new_text)
+
+    def test_unknown_past_message_reaction_skip(self):
+        """DB에 기록이 없는 과거 메시지에 반응이 달렸을 때 스킵 처리 검증"""
+        unknown_msg_id = 999999
+        previous_text = self.bot.get_cached_message_text(self.test_chat_id, unknown_msg_id)
+        # DB에 기록이 없으므로 None이어야 하며, 이 경우 번역을 실행하지 않고 스킵
+        self.assertIsNone(previous_text)
 
 
 if __name__ == "__main__":

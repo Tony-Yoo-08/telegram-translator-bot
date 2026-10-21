@@ -6,7 +6,7 @@ import threading
 import asyncio
 import html
 from collections import OrderedDict
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Set
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from dotenv import load_dotenv
@@ -26,6 +26,12 @@ from telegram.ext import (
     filters,
 )
 
+try:
+    from telegram.ext import MessageReactionHandler
+    HAS_REACTION_HANDLER = True
+except ImportError:
+    HAS_REACTION_HANDLER = False
+
 import db
 from security import (
     verify_payload,
@@ -41,6 +47,9 @@ from translator import (
     get_translation_targets,
     determine_translation_plan,
     is_trivial_reaction,
+    SUPPORTED_TARGET_LANGUAGES,
+    ORDERED_TARGET_LANGS,
+    parse_active_languages,
 )
 from glossary import GlossaryManager
 
@@ -88,51 +97,142 @@ DUPLICATE_TEXT_WINDOW_SECONDS = 30  # 30초 이내 동일 사용자 중복 방�
 
 # 4. 활성화 시 대화형 언어 선택 대기 메시지 캐시: chat_id -> message_id (선택 완료 시 자동 삭제용)
 PENDING_LANG_PROMPTS: Dict[int, int] = {}
+# 5. 다중 선택 체크박스 임시 상태 캐시: chat_id -> Set[str] (예: {'en', 'vi'})
+PENDING_LANG_SELECTIONS: Dict[int, Set[str]] = {}
 
 
-def build_lang_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    """대화방 언어 선택용 5대 언어 인라인 키보드 (2x2 + 1 배치)"""
-    return InlineKeyboardMarkup([
+def build_lang_keyboard(chat_id: int, current_set: Optional[Set[str]] = None) -> InlineKeyboardMarkup:
+    """대화방 언어 다중 선택 체크박스 인라인 키보드 (2x2 언어 체크박스 + 전체선택 + 적용완료)"""
+    if current_set is None:
+        if chat_id in PENDING_LANG_SELECTIONS:
+            current_set = PENDING_LANG_SELECTIONS[chat_id]
+        else:
+            conf = db.get_group_config(chat_id)
+            current_set = parse_active_languages(conf.get("lang_mode", "all"))
+            PENDING_LANG_SELECTIONS[chat_id] = set(current_set)
+
+    def _btn(code: str, label: str):
+        checked = code in current_set
+        icon = "☑️" if checked else "⬜"
+        return InlineKeyboardButton(f"{icon} {label}", callback_data=f"tgl_lang:{chat_id}:{code}")
+
+    all_checked = (len(current_set) == len(ORDERED_TARGET_LANGS))
+    all_btn_text = "🌐 5개국어 전체 해제" if all_checked else "🌐 5개국어 전체 선택 (한·영·베·중·스)"
+
+    buttons = [
         [
-            InlineKeyboardButton("🇺🇸 한-영 (ko-en)", callback_data=f"room_lang:{chat_id}:ko-en"),
-            InlineKeyboardButton("🇻🇳 한-베 (ko-vi)", callback_data=f"room_lang:{chat_id}:ko-vi"),
+            _btn("en", "🇺🇸 영어"),
+            _btn("vi", "🇻🇳 베트남어"),
         ],
         [
-            InlineKeyboardButton("🇨🇳 한-중 (ko-zh)", callback_data=f"room_lang:{chat_id}:ko-zh"),
-            InlineKeyboardButton("🇪🇸 한-스 (ko-es)", callback_data=f"room_lang:{chat_id}:ko-es"),
+            _btn("zh", "🇨🇳 중국어"),
+            _btn("es", "🇪🇸 스페인어"),
         ],
         [
-            InlineKeyboardButton("🌐 3개국어 전체 (한·영·베)", callback_data=f"room_lang:{chat_id}:all"),
+            InlineKeyboardButton(all_btn_text, callback_data=f"tgl_all:{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ 설정 완료 (적용하기)", callback_data=f"save_lang:{chat_id}"),
         ]
-    ])
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_lang_card_text(current_set: Set[str]) -> str:
+    """선택된 언어 상태에 따른 안내 카드 본문 텍스트 생성"""
+    if len(current_set) == len(ORDERED_TARGET_LANGS):
+        summary = "🌐 **5개국어 전체 번역** (한국어 ↔ 영어, 베트남어, 중국어, 스페인어)"
+    elif not current_set:
+        summary = "⚠️ *선택된 언어 없음 (최소 1개 이상 체크해 주세요)*"
+    else:
+        names = [
+            f"{SUPPORTED_TARGET_LANGUAGES[k]['flag']} {SUPPORTED_TARGET_LANGUAGES[k]['name']}"
+            for k in ORDERED_TARGET_LANGS
+            if k in current_set
+        ]
+        summary = f"**{', '.join(names)}** (총 {len(current_set)}개 언어)"
+
+    return (
+        "🌐 **대화방 번역 언어 다중 선택 (체크박스)**\n\n"
+        f"• 현재 선택: {summary}\n\n"
+        "원하시는 번역 언어를 **중복 체크(다중 선택)** 하실 수 있습니다.\n"
+        "버튼을 눌러 언어를 켜고(☑️) 끈(⬜) 뒤, 하단의 **[✅ 설정 완료 (적용하기)]** 를 눌러주세요:\n\n"
+        "• 🇺🇸 **영어** : 한국어 ↔ 영어 실시간 번역\n"
+        "• 🇻🇳 **베트남어** : 한국어 ↔ 베트남어 실시간 번역\n"
+        "• 🇨🇳 **중국어** : 한국어 ↔ 중국어 실시간 번역\n"
+        "• 🇪🇸 **스페인어** : 한국어 ↔ 스페인어 실시간 번역\n"
+        "• 🌐 **5개국어 전체** : 한국어 ↔ 4개국 외국어 동시 번역\n\n"
+        "*(명령어로도 즉시 설정 가능: `/lang all`, `/lang en vi`)*\n\n"
+        "⚠️ *대화방 관리자(방장/어드민)만 설정할 수 있습니다.*"
+    )
 
 
 def get_lang_mode_display_name(mode: str) -> str:
     """언어 모드 코드에 대응하는 사용자 친화적 명칭 반환"""
-    mapping = {
-        "ko-en": "🇺🇸 한-영 (English)",
-        "ko-vi": "🇻🇳 한-베 (Tiếng Việt)",
-        "ko-zh": "🇨🇳 한-중 (中文)",
-        "ko-es": "🇪🇸 한-스 (Español)",
-        "all": "🌐 3개국어 전체 (한·영·베)"
-    }
-    return mapping.get(mode.lower(), mode)
+    active = parse_active_languages(mode)
+    if len(active) == len(ORDERED_TARGET_LANGS):
+        return "🌐 5개국어 전체 (한·영·베·중·스)"
+    if active == {"en"}:
+        return "🇺🇸 한-영 (English)"
+    if active == {"vi"}:
+        return "🇻🇳 한-베 (Tiếng Việt)"
+    if active == {"zh"}:
+        return "🇨🇳 한-중 (中文)"
+    if active == {"es"}:
+        return "🇪🇸 한-스 (Español)"
+    if not active:
+        return "⚠️ 선택된 언어 없음"
+
+    names = [
+        f"{SUPPORTED_TARGET_LANGUAGES[k]['flag']} {SUPPORTED_TARGET_LANGUAGES[k]['name']}"
+        for k in ORDERED_TARGET_LANGS
+        if k in active
+    ]
+    return " + ".join(names) + " (다중 선택)"
 
 
 def get_cached_message_text(chat_id: int, message_id: int) -> Optional[str]:
-    """메시지 ID에 대해 캐시된 이전 텍스트 반환 (없으면 None)"""
-    return PROCESSED_MESSAGE_TEXTS.get((chat_id, message_id))
+    """메시지 ID에 대해 캐시된 이전 텍스트 반환 (L1 메모리 -> L2 DB 영구 저장소 조회)"""
+    key = (chat_id, message_id)
+    if key in PROCESSED_MESSAGE_TEXTS:
+        return PROCESSED_MESSAGE_TEXTS[key]
+
+    # L2 DB 확인 (서버 재기동/신규 패치 후에도 유지)
+    record = db.get_message_translation(chat_id, message_id)
+    if record and record.get("original_text") is not None:
+        text = record["original_text"]
+        PROCESSED_MESSAGE_TEXTS[key] = text
+        if len(PROCESSED_MESSAGE_TEXTS) > MAX_TEXT_CACHE:
+            PROCESSED_MESSAGE_TEXTS.popitem(last=False)
+        return text
+    return None
 
 
 def get_bot_reply_id(chat_id: int, message_id: int) -> Optional[int]:
-    """특정 사용자 메시지에 대응하는 봇 번역 메시지 ID 반환"""
-    return BOT_TRANSLATION_REPLIES.get((chat_id, message_id))
+    """특정 사용자 메시지에 대응하는 봇 번역 메시지 ID 반환 (L1 메모리 -> L2 DB 조회)"""
+    key = (chat_id, message_id)
+    if key in BOT_TRANSLATION_REPLIES:
+        return BOT_TRANSLATION_REPLIES[key]
+
+    # L2 DB 확인
+    record = db.get_message_translation(chat_id, message_id)
+    if record and record.get("bot_reply_id") is not None:
+        reply_id = record["bot_reply_id"]
+        BOT_TRANSLATION_REPLIES[key] = reply_id
+        if len(BOT_TRANSLATION_REPLIES) > MAX_REPLY_CACHE:
+            BOT_TRANSLATION_REPLIES.popitem(last=False)
+        return reply_id
+    return None
 
 
 def record_message_cache(
-    chat_id: int, message_id: int, text: str, reply_id: Optional[int] = None
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_id: Optional[int] = None,
+    user_id: int = 0,
 ):
-    """메시지 텍스트 및 봇 답장 ID를 캐시에 기록 (LRU 유지)"""
+    """메시지 텍스트 및 봇 답장 ID를 L1 메모리 캐시 및 L2 SQLite DB에 영구 기록"""
     key = (chat_id, message_id)
     PROCESSED_MESSAGE_TEXTS[key] = text
     if len(PROCESSED_MESSAGE_TEXTS) > MAX_TEXT_CACHE:
@@ -143,17 +243,20 @@ def record_message_cache(
         if len(BOT_TRANSLATION_REPLIES) > MAX_REPLY_CACHE:
             BOT_TRANSLATION_REPLIES.popitem(last=False)
 
+    # L2 DB 영구 저장 (봇 재부팅/패치 후에도 메시지 수정 및 리액션 무시 기능 보존)
+    db.record_message_translation(chat_id, message_id, user_id, text, reply_id)
+
 
 def is_already_processed(chat_id: int, message_id: int) -> bool:
-    """하위 호환용: 메시지 ID 캐시 존재 여부"""
-    return (chat_id, message_id) in PROCESSED_MESSAGE_TEXTS
+    """하위 호환용: 메시지 ID 캐시/DB 존재 여부"""
+    return get_cached_message_text(chat_id, message_id) is not None
 
 
 def mark_as_processed(
-    chat_id: int, message_id: int, text: str = "", reply_id: Optional[int] = None
+    chat_id: int, message_id: int, text: str = "", reply_id: Optional[int] = None, user_id: int = 0
 ):
-    """하위 호환용: 메시지 캐시 등록"""
-    record_message_cache(chat_id, message_id, text, reply_id)
+    """하위 호환용: 메시지 캐시 및 DB 등록"""
+    record_message_cache(chat_id, message_id, text, reply_id, user_id)
 
 
 def is_duplicate_content(chat_id: int, thread_id: Optional[int], text: str, user_id: int = 0) -> bool:
@@ -343,19 +446,10 @@ async def track_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYP
             # 요구사항 1 & 4: 신규 방 초대 시에만 즉시 언어 선택 질문 카드 전송 (기존 방은 설정 보존 및 중복 전송 방지)
             if not is_already_registered and db.is_group_allowed(chat.id):
                 try:
-                    guide_text = (
-                        "🎉 **통번역 봇이 대화방에 연결되었습니다!**\n\n"
-                        "이 대화방에서 **사용하고자 하시는 번역 언어 모드**를 아래 버튼에서 선택해 주세요:\n\n"
-                        "• 🇺🇸 **한-영** : 한국어 ↔ 영어 전용 번역\n"
-                        "• 🇻🇳 **한-베** : 한국어 ↔ 베트남어 전용 번역\n"
-                        "• 🇨🇳 **한-중** : 한국어 ↔ 중국어 전용 번역\n"
-                        "• 🇪🇸 **한-스** : 한국어 ↔ 스페인어 전용 번역\n"
-                        "• 🌐 **3개국어** : 한국어 ↔ 영어 ↔ 베트남어 전체 동시 번역\n\n"
-                        "*(채팅창 명령어로도 설정 가능: `/lang`)*\n\n"
-                        "⚠️ *대화방 관리자(방장/어드민)만 선택할 수 있습니다.*\n"
-                        "💡 *언어 선택이 완료되면 이 안내 카드는 대화방 정리를 위해 자동으로 삭제됩니다.*"
-                    )
-                    reply_markup = build_lang_keyboard(chat.id)
+                    init_set = set(ORDERED_TARGET_LANGS)
+                    PENDING_LANG_SELECTIONS[chat.id] = set(init_set)
+                    guide_text = build_lang_card_text(init_set)
+                    reply_markup = build_lang_keyboard(chat.id, init_set)
                     prompt_msg = await context.bot.send_message(
                         chat_id=chat.id,
                         text=guide_text,
@@ -450,34 +544,160 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     action = data.split(":", 1)[0]
 
-    # 1. 대화방 현장 언어 선택 버튼 (방장/그룹 관리자 및 총괄 관리자 모두 허용)
-    if action == "room_lang":
+    async def _check_group_perm(target_chat_id: int) -> bool:
+        if is_admin(user.id):
+            return True
+        if user.id in [1087968824, 136817688] or getattr(user, "username", "") == "GroupAnonymousBot":
+            return True
+        try:
+            member = await context.bot.get_chat_member(target_chat_id, user.id)
+            return member.status in ["creator", "administrator"]
+        except Exception:
+            return False
+
+    # 1. 다중 선택 체크박스 토글 (개별 언어 on/off)
+    if action == "tgl_lang":
         parts = data.split(":")
         target_chat_id = int(parts[1])
-        chosen_mode = parts[2]
+        lang_code = parts[2]
 
-        # 권한 확인: 총괄 관리자이거나 해당 방의 텔레그램 관리자인지 검사
-        if not is_admin(user.id):
-            try:
-                member = await context.bot.get_chat_member(target_chat_id, user.id)
-                if member.status not in ["creator", "administrator"]:
-                    await query.answer("대화방 관리자만 언어 모드를 설정할 수 있습니다.", show_alert=True)
-                    return
-            except Exception:
-                pass
+        if not await _check_group_perm(target_chat_id):
+            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            return
 
-        mode_name = get_lang_mode_display_name(chosen_mode)
+        if target_chat_id not in PENDING_LANG_SELECTIONS:
+            conf = db.get_group_config(target_chat_id)
+            PENDING_LANG_SELECTIONS[target_chat_id] = set(parse_active_languages(conf.get("lang_mode", "all")))
 
-        db.update_group_config(target_chat_id, lang_mode=chosen_mode)
+        current_set = PENDING_LANG_SELECTIONS[target_chat_id]
+        if lang_code in current_set:
+            current_set.remove(lang_code)
+        else:
+            current_set.add(lang_code)
+
+        new_text = build_lang_card_text(current_set)
+        new_markup = build_lang_keyboard(target_chat_id, current_set)
+
+        try:
+            await query.edit_message_text(new_text, reply_markup=new_markup, parse_mode="Markdown")
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to edit message in tgl_lang: {e}")
+        return
+
+    # 2. 5개국어 전체 선택 / 전체 해제 토글
+    elif action == "tgl_all":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+
+        if not await _check_group_perm(target_chat_id):
+            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            return
+
+        if target_chat_id not in PENDING_LANG_SELECTIONS:
+            conf = db.get_group_config(target_chat_id)
+            PENDING_LANG_SELECTIONS[target_chat_id] = set(parse_active_languages(conf.get("lang_mode", "all")))
+
+        current_set = PENDING_LANG_SELECTIONS[target_chat_id]
+        if len(current_set) == len(ORDERED_TARGET_LANGS):
+            current_set.clear()
+        else:
+            current_set = set(ORDERED_TARGET_LANGS)
+        PENDING_LANG_SELECTIONS[target_chat_id] = current_set
+
+        new_text = build_lang_card_text(current_set)
+        new_markup = build_lang_keyboard(target_chat_id, current_set)
+
+        try:
+            await query.edit_message_text(new_text, reply_markup=new_markup, parse_mode="Markdown")
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to edit message in tgl_all: {e}")
+        return
+
+    # 3. 설정 완료 (적용하기)
+    elif action == "save_lang":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+
+        if not await _check_group_perm(target_chat_id):
+            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 저장할 수 있습니다.", show_alert=True)
+            return
+
+        if target_chat_id not in PENDING_LANG_SELECTIONS:
+            conf = db.get_group_config(target_chat_id)
+            PENDING_LANG_SELECTIONS[target_chat_id] = set(parse_active_languages(conf.get("lang_mode", "all")))
+
+        current_set = PENDING_LANG_SELECTIONS[target_chat_id]
+        if not current_set:
+            await query.answer("⚠️ 최소 1개 이상의 번역 언어를 체크해 주세요!", show_alert=True)
+            return
+
+        if len(current_set) == len(ORDERED_TARGET_LANGS):
+            saved_mode = "all"
+        else:
+            saved_mode = ",".join([k for k in ORDERED_TARGET_LANGS if k in current_set])
+
+        db.set_group_allowed(target_chat_id, True)
+        db.update_group_config(target_chat_id, lang_mode=saved_mode)
         PENDING_LANG_PROMPTS.pop(target_chat_id, None)
+        PENDING_LANG_SELECTIONS.pop(target_chat_id, None)
 
-        # 1. 안내 메시지 자동 삭제 (사용자 요청: 언어 설정 완료 시 안내 메시지 삭제)
+        mode_name = get_lang_mode_display_name(saved_mode)
+
+        # 1. 안내 메시지 카드 자동 삭제 (대화방 정리)
         try:
             await query.message.delete()
         except Exception:
             pass
 
-        # 2. 간결한 완료 메시지 전송 후 7초 뒤 자동 정리 (사용 팁 /help 포함)
+        # 2. 간결한 완료 메시지 전송 후 7초 뒤 자동 정리
+        try:
+            sent_notice = await context.bot.send_message(
+                chat_id=target_chat_id,
+                text=(
+                    f"✅ 대화방 번역 모드가 **{mode_name}**(으)로 설정되었습니다.\n\n"
+                    f"• 이제 대화방에 메시지를 올리시면 실시간 자동 번역됩니다.\n\n"
+                    f"💡 **사용 팁**:\n"
+                    f"• 언제든 언어 변경: `/lang`\n"
+                    f"• 대화방 기능 및 명령어 확인: `/help`"
+                ),
+                parse_mode="Markdown"
+            )
+            if sent_notice:
+                async def _cleanup(msg):
+                    await asyncio.sleep(7)
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                asyncio.create_task(_cleanup(sent_notice))
+        except Exception as e:
+            logger.warning(f"Failed to send save confirmation notice: {e}")
+        return
+
+    # 4. 하위 호환용 단일 선택 모드 (과거 메시지 버튼 클릭 대응)
+    elif action == "room_lang":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+        chosen_mode = parts[2]
+
+        if not await _check_group_perm(target_chat_id):
+            await query.answer("대화방 관리자(방장/어드민)만 언어 모드를 설정할 수 있습니다.", show_alert=True)
+            return
+
+        mode_name = get_lang_mode_display_name(chosen_mode)
+
+        db.set_group_allowed(target_chat_id, True)
+        db.update_group_config(target_chat_id, lang_mode=chosen_mode)
+        PENDING_LANG_PROMPTS.pop(target_chat_id, None)
+        PENDING_LANG_SELECTIONS.pop(target_chat_id, None)
+
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
         try:
             sent_notice = await context.bot.send_message(
                 chat_id=target_chat_id,
@@ -531,19 +751,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         db.set_group_allowed(target_id, True)
         try:
             await query.edit_message_text(f"✅ 그룹 대화방(ID: `{target_id}`)이 정상 승인되었습니다.", parse_mode="Markdown")
-            guide_text = (
-                "🎉 **이 대화방의 번역 기능이 정상 승인되었습니다!**\n\n"
-                "이 대화방에서 **사용하고자 하시는 번역 언어 모드**를 아래 버튼에서 선택해 주세요:\n\n"
-                "• 🇺🇸 **한-영** : 한국어 ↔ 영어 전용 번역\n"
-                "• 🇻🇳 **한-베** : 한국어 ↔ 베트남어 전용 번역\n"
-                "• 🇨🇳 **한-중** : 한국어 ↔ 중국어 전용 번역\n"
-                "• 🇪🇸 **한-스** : 한국어 ↔ 스페인어 전용 번역\n"
-                "• 🌐 **3개국어** : 한국어 ↔ 영어 ↔ 베트남어 전체 동시 번역\n\n"
-                "*(채팅창 명령어로도 설정 가능: `/lang`)*\n\n"
-                "⚠️ *대화방 관리자(방장/어드민)만 선택할 수 있습니다.*\n"
-                "💡 *언어 선택이 완료되면 이 안내 카드는 대화방 정리를 위해 자동으로 삭제됩니다.*"
-            )
-            reply_markup = build_lang_keyboard(target_id)
+            init_set = parse_active_languages(db.get_group_config(target_id).get("lang_mode", "all"))
+            PENDING_LANG_SELECTIONS[target_id] = set(init_set)
+            guide_text = build_lang_card_text(init_set)
+            reply_markup = build_lang_keyboard(target_id, init_set)
             prompt_msg = await context.bot.send_message(
                 chat_id=target_id,
                 text=guide_text,
@@ -1125,21 +1336,13 @@ async def cmd_allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.enable_topic(chat.id, target_thread)
         topic_guide = f"• **현재 주제(토픽 ID: {target_thread})** 번역이 즉시 켜졌습니다.\n\n"
 
-    reply_markup = build_lang_keyboard(chat.id)
-
+    init_set = parse_active_languages(db.get_group_config(chat.id).get("lang_mode", "all"))
+    PENDING_LANG_SELECTIONS[chat.id] = set(init_set)
+    reply_markup = build_lang_keyboard(chat.id, init_set)
     guide = (
         "🎉 **이 대화방의 번역 기능이 활성화되었습니다!**\n\n"
         f"{topic_guide}"
-        "어떤 번역 유형으로 사용하시겠습니까?\n"
-        "아래 버튼을 눌러 **기본 언어 모드**를 선택해 주세요:\n\n"
-        "• 🇺🇸 **한-영** : 한국어 ↔ 영어 전용 번역\n"
-        "• 🇻🇳 **한-베** : 한국어 ↔ 베트남어 전용 번역\n"
-        "• 🇨🇳 **한-중** : 한국어 ↔ 중국어 전용 번역\n"
-        "• 🇪🇸 **한-스** : 한국어 ↔ 스페인어 전용 번역\n"
-        "• 🌐 **3개국어** : 한국어 ↔ 영어 ↔ 베트남어 전체 동시 번역\n\n"
-        "*(채팅창 명령어로도 설정 가능: `/lang`)*\n\n"
-        "⚠️ *대화방 관리자(방장/어드민)만 선택할 수 있습니다.*\n"
-        "💡 *언어 선택이 완료되면 이 안내 메시지는 깔끔하게 자동 삭제됩니다.*"
+        f"{build_lang_card_text(init_set)}"
     )
 
     prompt_msg = await send_command_feedback(update, context, guide, reply_markup=reply_markup, parse_mode="Markdown")
@@ -1239,34 +1442,16 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_command_feedback(update, context, "안내: 설정 변경은 대화방 관리자만 가능합니다.")
         return
 
-    args = context.args
-    raw_mode = args[0].lower().strip() if args else ""
-    if raw_mode in ["all", "전체", "모두", "3개국어", "3"]:
-        new_mode = "all"
-    elif raw_mode in ["ko-vi", "vi", "한베", "베트남", "베트남어"]:
-        new_mode = "ko-vi"
-    elif raw_mode in ["ko-en", "en", "한영", "영어"]:
-        new_mode = "ko-en"
-    elif raw_mode in ["ko-zh", "zh", "한중", "중국", "중국어"]:
-        new_mode = "ko-zh"
-    elif raw_mode in ["ko-es", "es", "한스", "스페인", "스페인어"]:
-        new_mode = "ko-es"
-    else:
+    args = context.args or []
+    if not args:
         conf = db.get_group_config(chat.id)
         current = conf.get("lang_mode", "all")
-        current_name = get_lang_mode_display_name(current)
-        reply_markup = build_lang_keyboard(chat.id)
-        guide_text = (
-            f"📊 **현재 번역 모드**: **`{current_name}`**\n\n"
-            "변경하고자 하시는 **번역 언어 모드**를 아래 버튼에서 선택해 주세요:\n\n"
-            "• 🇺🇸 **한-영** : 한국어 ↔ 영어 전용 번역\n"
-            "• 🇻🇳 **한-베** : 한국어 ↔ 베트남어 전용 번역\n"
-            "• 🇨🇳 **한-중** : 한국어 ↔ 중국어 전용 번역\n"
-            "• 🇪🇸 **한-스** : 한국어 ↔ 스페인어 전용 번역\n"
-            "• 🌐 **3개국어** : 한국어 ↔ 영어 ↔ 베트남어 전체 동시 번역\n\n"
-            "*(직접 명령어로 입력: `/lang ko-en`, `/lang ko-vi`, `/lang ko-zh`, `/lang ko-es`, `/lang all`)*\n\n"
-            "💡 **버튼을 누르시면 설정이 즉시 반영되고 카드는 자동으로 정리됩니다.**"
-        )
+        current_set = parse_active_languages(current)
+        PENDING_LANG_SELECTIONS[chat.id] = set(current_set)
+
+        guide_text = build_lang_card_text(current_set)
+        reply_markup = build_lang_keyboard(chat.id, current_set)
+
         prompt_msg = await send_command_feedback(
             update,
             context,
@@ -1278,11 +1463,28 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             PENDING_LANG_PROMPTS[chat.id] = prompt_msg.message_id
         return
 
+    # 직접 언어 인자를 입력한 경우 (예: /lang en vi, /lang 영어 중국어, /lang all)
+    raw_input = " ".join(args).lower().strip()
+    active = parse_active_languages(raw_input)
+    if not active:
+        await send_command_feedback(
+            update,
+            context,
+            "⚠️ 유효한 언어가 지정되지 않았습니다.\n예: `/lang all`, `/lang en vi`, `/lang 영어 중국어`"
+        )
+        return
+
+    if len(active) == len(ORDERED_TARGET_LANGS):
+        new_mode = "all"
+    else:
+        new_mode = ",".join([k for k in ORDERED_TARGET_LANGS if k in active])
+
     if chat.type != "private":
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, lang_mode=new_mode)
+    PENDING_LANG_SELECTIONS.pop(chat.id, None)
 
-    # 대기 중인 언어 선택 안내 메시지가 있다면 자동 삭제 (사용자 요청 반영)
+    # 대기 중인 언어 선택 안내 카드가 있다면 자동 삭제
     if chat.id in PENDING_LANG_PROMPTS:
         old_prompt_id = PENDING_LANG_PROMPTS.pop(chat.id)
         try:
@@ -1290,53 +1492,21 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    if new_mode == "all":
-        desc = (
-            "🌐 **[언어 설정 변경: 3개국어 통합 모드]**\n\n"
-            "실시간 번역 모드가 **'3개국어 통합 모드'** 로 설정되었습니다.\n\n"
-            "• 🇰🇷 **한국어** 입력 ➡️ 🇺🇸 영어 + 🇻🇳 베트남어 동시 번역\n"
-            "• 🇺🇸 **영어** 입력 ➡️ 🇰🇷 한국어로 번역\n"
-            "• 🇻🇳 **베트남어** 입력 ➡️ 🇰🇷 한국어로 번역\n\n"
-            "✨ 모든 참가자가 언어 장벽 없이 원활하게 소통할 수 있습니다."
-        )
-    elif new_mode == "ko-vi":
-        desc = (
-            "🇻🇳 **[언어 설정 변경: 한국어 ↔ 베트남어 전용 모드]**\n\n"
-            "실시간 번역 모드가 **'한-베 전용 모드'** 로 설정되었습니다.\n\n"
-            "• 🇰🇷 **한국어** 입력 ➡️ 🇻🇳 베트남어로 번역\n"
-            "• 🇻🇳 **베트남어** 입력 ➡️ 🇰🇷 한국어로 번역\n"
-            "(영어 등 기타 언어는 번역되지 않고 원문 그대로 유지됩니다.)\n\n"
-            "✨ 한국어와 베트남어 집중 소통에 최적화되었습니다."
-        )
-    elif new_mode == "ko-en":
-        desc = (
-            "🇺🇸 **[언어 설정 변경: 한국어 ↔ 영어 전용 모드]**\n\n"
-            "실시간 번역 모드가 **'한-영 전용 모드'** 로 설정되었습니다.\n\n"
-            "• 🇰🇷 **한국어** 입력 ➡️ 🇺🇸 영어로 번역\n"
-            "• 🇺🇸 **영어** 입력 ➡️ 🇰🇷 한국어로 번역\n"
-            "(베트남어 등 기타 언어는 번역되지 않고 원문 그대로 유지됩니다.)\n\n"
-            "✨ 한국어와 영어 집중 소통에 최적화되었습니다."
-        )
-    elif new_mode == "ko-zh":
-        desc = (
-            "🇨🇳 **[언어 설정 변경: 한국어 ↔ 중국어 전용 모드]**\n\n"
-            "실시간 번역 모드가 **'한-중 전용 모드'** 로 설정되었습니다.\n\n"
-            "• 🇰🇷 **한국어** 입력 ➡️ 🇨🇳 중국어(간체)로 번역\n"
-            "• 🇨🇳 **중국어** 입력 ➡️ 🇰🇷 한국어로 번역\n"
-            "(기타 언어는 원문 그대로 유지됩니다.)\n\n"
-            "✨ 한국어와 중국어 집중 소통에 최적화되었습니다."
-        )
-    elif new_mode == "ko-es":
-        desc = (
-            "🇪🇸 **[언어 설정 변경: 한국어 ↔ 스페인어 전용 모드]**\n\n"
-            "실시간 번역 모드가 **'한-스 전용 모드'** 로 설정되었습니다.\n\n"
-            "• 🇰🇷 **한국어** 입력 ➡️ 🇪🇸 스페인어로 번역\n"
-            "• 🇪🇸 **스페인어** 입력 ➡️ 🇰🇷 한국어로 번역\n"
-            "(기타 언어는 원문 그대로 유지됩니다.)\n\n"
-            "✨ 한국어와 스페인어 집중 소통에 최적화되었습니다."
-        )
-    else:
-        desc = f"✅ 언어 모드가 `{new_mode}`로 변경되었습니다."
+    mode_name = get_lang_mode_display_name(new_mode)
+    target_names = [
+        f"{SUPPORTED_TARGET_LANGUAGES[k]['flag']} {SUPPORTED_TARGET_LANGUAGES[k]['name']}"
+        for k in ORDERED_TARGET_LANGS
+        if k in active
+    ]
+
+    desc = (
+        f"✅ **[대화방 번역 언어 설정 완료]**\n\n"
+        f"• 적용 모드: **{mode_name}**\n"
+        f"• 활성 외국어: **{', '.join(target_names)}**\n\n"
+        f"• 🇰🇷 **한국어** 입력 ➡️ {', '.join(target_names)} 동시 실시간 번역\n"
+        f"• 외국어 입력 ➡️ 🇰🇷 **한국어**로 자동 번역\n\n"
+        f"✨ 참가자들이 언어 장벽 없이 원활하게 소통할 수 있습니다."
+    )
 
     await send_command_feedback(update, context, desc, parse_mode="Markdown")
 
@@ -1458,12 +1628,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 요구사항 2: 대화방에서는 대화방 실무 필수 명령어만 깔끔하게 노출
         group_text = (
-            "📖 **대화방 번역 봇 사용 안내**\n\n"
-            "• 한국어 및 선택된 언어 간 실시간 양방향 자동 번역\n"
+            "📖 **대화방 번역 봇 사용 안내 (5개국어 지원)**\n\n"
+            "• 한국어 ↔ 영어, 베트남어, 중국어, 스페인어 실시간 양방향 자동 번역\n"
+            "• 원하는 언어만 자유롭게 골라 번역하는 **다중 체크(중복 선택)** 지원\n"
             "• 단순 감탄사/단답형 리액션 자동 필터링\n\n"
             "📌 **대화방 주요 명령어 (방장/관리자 전용)**:\n"
-            "• `/lang` (또는 `언어`) : **번역 언어 선택 카드 열기** (버튼 클릭으로 언어 변경)\n"
-            "• `/lang [모드]` : 명령어로 직접 언어 변경 (`ko-en`, `ko-vi`, `ko-zh`, `ko-es`, `all`)\n"
+            "• `/lang` (또는 `언어`) : **번역 언어 다중 선택 카드 열기** (원하는 언어 체크박스 선택 후 적용)\n"
+            "• `/lang all` : 5개국어 전체 번역 일괄 적용\n"
+            "• `/lang [언어들]` : 직접 언어 지정 (예: `/lang en vi`, `/lang 영어 중국어`)\n"
             "• `/translate on | off` (또는 `번역 켜기 | 끄기`) : 대화방 전체 번역 일시정지 / 재개\n"
             "• `/topic on | off | all` : (포럼 방인 경우) 현재 주제(토픽)별 번역 켜기/끄기\n"
             "• `/status` (또는 `상태`) : 현재 방의 언어 설정 및 작동 상태 확인\n"
@@ -1646,20 +1818,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. 텍스트 변경 여부 확인 (메시지 수정 vs 단순 리액션/반응 구분)
     previous_text = get_cached_message_text(chat.id, message.message_id)
-    is_edit = (previous_text is not None) or (update.edited_message is not None)
 
-    if previous_text is not None:
-        if previous_text == current_text:
-            # 텍스트 내용에 변화가 없음 -> 단순 이모지 리액션 또는 중복 이벤트
-            logger.info(f"Message {message.message_id} in chat {chat.id} text unchanged. Skipping.")
+    if update.edited_message is not None:
+        # 텔레그램에서 edited_message 이벤트(수정/반응/상태변경)로 들어온 경우
+        if previous_text is not None:
+            if previous_text == current_text:
+                # 텍스트 내용에 변화가 없음 -> 단순 이모지 리액션 또는 텔레그램 내부 상태 갱신
+                logger.info(
+                    f"Message {message.message_id} in chat {chat.id} text unchanged "
+                    "(emoji reaction / status update). Skipping translation."
+                )
+                return
+            # 텍스트가 실제로 변경됨 -> 메시지 내용 수정(Edit)
+            is_edit = True
+            logger.info(
+                f"Message {message.message_id} in chat {chat.id} was EDITED (text changed). "
+                "Updating existing translation."
+            )
+        else:
+            # DB 및 메모리에 이전 번역 이력이 없는 경우 (패치 이전 과거 메시지 또는 미번역 메시지)
+            # 기존 메시지에 리액션을 눌렀을 때 재번역 답장이 발생하는 문제를 방지하기 위해 스킵
+            logger.info(
+                f"Message {message.message_id} in chat {chat.id} received as edited_message "
+                "without previous translation record. Skipping to avoid duplicate translation on reaction."
+            )
             return
-        logger.info(f"Message {message.message_id} in chat {chat.id} was EDITED. Updating translation.")
-    elif update.edited_message is not None:
-        logger.info(f"Message {message.message_id} in chat {chat.id} received as edited_message without cache.")
+    else:
+        # 일반 신규 메시지 수신
+        if previous_text is not None:
+            if previous_text == current_text:
+                # 네트워크 재전송 등에 의한 완전 동일 메시지 중복 처리 방지
+                logger.info(f"Message {message.message_id} in chat {chat.id} already processed. Skipping duplicate.")
+                return
+            is_edit = True
+        else:
+            is_edit = False
 
     # 커스텀 및 한글 단축 명령어 가로채기
     if await handle_custom_or_korean_command(update, context):
-        record_message_cache(chat.id, message.message_id, current_text)
+        record_message_cache(chat.id, message.message_id, current_text, user_id=user.id)
         return
 
     # 2-1. 시스템 점검(일괄 정지) 모드 확인
@@ -1783,9 +1980,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_msg_id = sent_msg.message_id
 
     # 번역 성공 후 메시지 텍스트 및 봇 답장 ID 캐시에 등록
-    record_message_cache(chat.id, message.message_id, current_text, reply_msg_id)
+    record_message_cache(chat.id, message.message_id, current_text, reply_msg_id, user_id=user.id)
     record_translated_content(chat.id, current_target_thread, current_text, user.id)
     logger.info(f"Translation completed in chat_id={chat.id} (is_edit={is_edit})")
+
+
+async def ignore_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """메시지 이모지 반응(Reaction) 표시는 번역을 수행하지 않고 안전하게 무시"""
+    return
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -1843,8 +2045,26 @@ async def periodic_glossary_sync():
             logger.warning(f"Periodic glossary sync error: {e}")
 
 
+async def periodic_db_cleanup():
+    """백그라운드에서 24시간마다 오래된 번역 이력 레코드 자동 정리 (DB 용량 최적화)"""
+    while True:
+        try:
+            await asyncio.sleep(86400)
+            logger.info("Running scheduled DB cleanup for old message translations...")
+            await asyncio.to_thread(db.cleanup_old_message_translations, 14)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Periodic DB cleanup error: {e}")
+
+
 async def post_init(application):
-    """봇 기동 직후 초기 용어집 동기화 및 주기적 갱신 태스크 등록"""
+    """봇 기동 직후 초기 용어집 동기화, DB 정리 및 주기적 태스크 등록"""
+    # 1. 기동 시 14일 경과 오래된 번역 캐시 정리 및 24시간 주기 정리 등록
+    asyncio.create_task(asyncio.to_thread(db.cleanup_old_message_translations, 14))
+    asyncio.create_task(periodic_db_cleanup())
+
+    # 2. 용어집 동기화
     if glossary_manager.is_enabled():
         logger.info("Initializing glossary sync on bot startup...")
         # 초기 1회 비동기 동기화
@@ -1884,6 +2104,10 @@ def main():
     app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(ChatMemberHandler(track_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
+
+    # 반응(Reaction) 표시 전용 무시 핸들러 등록 (텔레그램 Bot API 7.0+)
+    if HAS_REACTION_HANDLER:
+        app.add_handler(MessageReactionHandler(ignore_reaction))
 
     message_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
     app.add_handler(MessageHandler(message_filter, handle_message))

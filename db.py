@@ -102,6 +102,25 @@ def init_db():
                 value TEXT NOT NULL
             )
         """)
+        # 번역 메시지 캐시 영구 테이블 (메시지 수정 감지 및 리액션 중복 번역 방지)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS message_translations (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER,
+                original_text TEXT NOT NULL,
+                bot_reply_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_msg_trans_chat_msg ON message_translations(chat_id, message_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_msg_trans_created ON message_translations(created_at)
+        """)
         # S5: .env 비상 관리자 자동 부트스트랩 (서버 재기동 시 데이터 보존)
         for e_id in parse_emergency_admin_ids():
             cursor.execute("""
@@ -389,3 +408,62 @@ def enable_all_topics(chat_id: int):
         cursor = conn.cursor()
         cursor.execute("UPDATE groups SET topic_mode = 'all' WHERE chat_id = ?", (chat_id,))
         conn.commit()
+
+
+# --- 번역 메시지 캐시 및 매핑 영구 저장 (DB 영속화) ---
+
+def record_message_translation(
+    chat_id: int,
+    message_id: int,
+    user_id: int,
+    text: str,
+    reply_id: Optional[int] = None,
+):
+    """메시지 원본 텍스트 및 봇 번역 메시지 ID를 SQLite DB에 영구 저장 (UPSERT)"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO message_translations (chat_id, message_id, user_id, original_text, bot_reply_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    original_text = excluded.original_text,
+                    bot_reply_id = COALESCE(excluded.bot_reply_id, message_translations.bot_reply_id),
+                    user_id = CASE WHEN excluded.user_id != 0 THEN excluded.user_id ELSE message_translations.user_id END,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (chat_id, message_id, user_id, text, reply_id))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving message translation record ({chat_id}, {message_id}): {e}")
+
+
+def get_message_translation(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+    """chat_id, message_id로 저장된 메시지 원본 텍스트 및 봇 답장 ID 조회"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT chat_id, message_id, user_id, original_text, bot_reply_id, created_at, updated_at
+                FROM message_translations
+                WHERE chat_id = ? AND message_id = ?
+            """, (chat_id, message_id))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+    except Exception as e:
+        logger.error(f"Error getting message translation ({chat_id}, {message_id}): {e}")
+    return None
+
+
+def cleanup_old_message_translations(days: int = 14):
+    """오래된 번역 이력 레코드 정리 (기본 14일 경과 데이터 삭제로 DB 크기 최적화)"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM message_translations
+                WHERE created_at < datetime('now', ?)
+            """, (f"-{days} days",))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Error cleaning up old message translations: {e}")
