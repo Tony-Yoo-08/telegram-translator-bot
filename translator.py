@@ -161,11 +161,14 @@ def parse_active_languages(mode: str) -> Set[str]:
         return set(ORDERED_TARGET_LANGS)
 
     m = mode.strip().lower()
-    if m in ["all", "5", "5개국어", "전체", "모두"]:
+    if m in ["all", "5", "5개국어", "5국어", "전체", "모두"]:
         return set(ORDERED_TARGET_LANGS)
-    if m in ["3", "3개국어"]:
-        # 과거 3개국어 하위 호환
+    if m in ["3", "3개국어", "3국어", "ko-en-vi"]:
+        # 3개국어: 한국어 + 영어 + 베트남어
         return {"en", "vi"}
+    if m in ["4", "4개국어", "4국어", "ko-en-vi-zh"]:
+        # 4개국어: 한국어 + 영어 + 베트남어 + 중국어
+        return {"en", "vi", "zh"}
     if m in ["ko-en", "en", "영어"]:
         return {"en"}
     if m in ["ko-vi", "vi", "베트남어"]:
@@ -189,6 +192,10 @@ def parse_active_languages(mode: str) -> Set[str]:
             result.add("zh")
         elif tok in ["es", "스페인어", "ko-es"]:
             result.add("es")
+        elif tok in ["3", "3개국어", "3국어"]:
+            result.update({"en", "vi"})
+        elif tok in ["4", "4개국어", "4국어"]:
+            result.update({"en", "vi", "zh"})
         elif tok in ["all", "전체", "5개국어", "5"]:
             return set(ORDERED_TARGET_LANGS)
 

@@ -10,6 +10,7 @@ DB_PATH = Path(__file__).parent / "auth_store.db"
 EMERGENCY_ADMIN_ID = os.getenv("EMERGENCY_ADMIN_ID", "").strip()
 AUTO_APPROVE_GROUPS = os.getenv("AUTO_APPROVE_GROUPS", "true").lower() in ["true", "1", "yes"]
 GROUP_LANG_MAP_RAW = os.getenv("GROUP_LANG_MAP", "").strip()
+DEFAULT_LANG_MODE = os.getenv("DEFAULT_LANG_MODE", "all").strip().lower()
 
 
 def parse_emergency_admin_ids() -> List[int]:
@@ -268,10 +269,10 @@ def is_group_allowed(chat_id: int) -> bool:
 
 
 def register_group(chat_id: int, title: str = "", is_forum: bool = False):
-    """신규 그룹 등록 (GROUP_LANG_MAP 설정이 있는 경우 해당 언어 모드 적용, 없으면 all)"""
+    """신규 그룹 등록 (GROUP_LANG_MAP 설정이 있는 경우 해당 언어 모드 적용, 없으면 DEFAULT_LANG_MODE)"""
     default_allowed = 1 if AUTO_APPROVE_GROUPS else 0
     env_map = parse_group_lang_map()
-    default_lang = env_map.get(chat_id, "all")
+    default_lang = env_map.get(chat_id, DEFAULT_LANG_MODE)
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -316,7 +317,7 @@ def delete_group(chat_id: int):
 
 def get_group_config(chat_id: int) -> Dict[str, Any]:
     env_map = parse_group_lang_map()
-    fallback_lang = env_map.get(chat_id, "all")
+    fallback_lang = env_map.get(chat_id, DEFAULT_LANG_MODE)
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -339,6 +340,15 @@ def get_group_config(chat_id: int) -> Dict[str, Any]:
             "is_forum": False,
             "topic_mode": "all"
         }
+
+
+def export_group_lang_map() -> Dict[str, str]:
+    """현재 DB에 저장된 방들의 chat_id와 lang_mode 딕셔너리 반환 (Render 백업용)"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id, lang_mode FROM groups WHERE lang_mode IS NOT NULL")
+        rows = cursor.fetchall()
+        return {str(row["chat_id"]): str(row["lang_mode"]) for row in rows}
 
 
 def update_group_config(chat_id: int, lang_mode: Optional[str] = None, is_enabled: Optional[bool] = None, topic_mode: Optional[str] = None):

@@ -120,6 +120,7 @@ def build_lang_keyboard(chat_id: int, current_set: Optional[Set[str]] = None) ->
     all_btn_text = "🌐 5개국어 전체 해제" if all_checked else "🌐 5개국어 전체 선택 (한·영·베·중·스)"
 
     buttons = [
+        # 개별 언어 체크박스 (2x2)
         [
             _btn("en", "🇺🇸 영어"),
             _btn("vi", "🇻🇳 베트남어"),
@@ -127,6 +128,11 @@ def build_lang_keyboard(chat_id: int, current_set: Optional[Set[str]] = None) ->
         [
             _btn("zh", "🇨🇳 중국어"),
             _btn("es", "🇪🇸 스페인어"),
+        ],
+        # 핵심 다국어 원클릭 프리셋 버튼
+        [
+            InlineKeyboardButton("🇰🇷🇺🇸🇻🇳 3개국어 (한·영·베)", callback_data=f"set_preset:{chat_id}:3"),
+            InlineKeyboardButton("🇰🇷🇺🇸🇻🇳🇨🇳 4개국어 (한·영·베·중)", callback_data=f"set_preset:{chat_id}:4"),
         ],
         [
             InlineKeyboardButton(all_btn_text, callback_data=f"tgl_all:{chat_id}"),
@@ -142,6 +148,10 @@ def build_lang_card_text(current_set: Set[str]) -> str:
     """선택된 언어 상태에 따른 안내 카드 본문 텍스트 생성"""
     if len(current_set) == len(ORDERED_TARGET_LANGS):
         summary = "🌐 **5개국어 전체 번역** (한국어 ↔ 영어, 베트남어, 중국어, 스페인어)"
+    elif current_set == {"en", "vi"}:
+        summary = "🇰🇷🇺🇸🇻🇳 **3개국어 번역** (한국어 ↔ 영어, 베트남어)"
+    elif current_set == {"en", "vi", "zh"}:
+        summary = "🇰🇷🇺🇸🇻🇳🇨🇳 **4개국어 번역** (한국어 ↔ 영어, 베트남어, 중국어)"
     elif not current_set:
         summary = "⚠️ *선택된 언어 없음 (최소 1개 이상 체크해 주세요)*"
     else:
@@ -150,45 +160,45 @@ def build_lang_card_text(current_set: Set[str]) -> str:
             for k in ORDERED_TARGET_LANGS
             if k in current_set
         ]
-        summary = f"**{', '.join(names)}** (총 {len(current_set)}개 언어)"
+        summary = f"**{', '.join(names)}** (총 {len(current_set)+1}개국어 번역)"
 
     return (
-        "🌐 **대화방 번역 언어 다중 선택 (체크박스)**\n\n"
+        "🌐 **대화방 번역 언어 다중 선택 (체크박스 및 프리셋)**\n\n"
         f"• 현재 선택: {summary}\n\n"
-        "원하시는 번역 언어를 **중복 체크(다중 선택)** 하실 수 있습니다.\n"
-        "버튼을 눌러 언어를 켜고(☑️) 끈(⬜) 뒤, 하단의 **[✅ 설정 완료 (적용하기)]** 를 눌러주세요:\n\n"
-        "• 🇺🇸 **영어** : 한국어 ↔ 영어 실시간 번역\n"
-        "• 🇻🇳 **베트남어** : 한국어 ↔ 베트남어 실시간 번역\n"
-        "• 🇨🇳 **중국어** : 한국어 ↔ 중국어 실시간 번역\n"
-        "• 🇪🇸 **스페인어** : 한국어 ↔ 스페인어 실시간 번역\n"
+        "원하시는 언어를 **체크박스**로 직접 고르시거나, **3개국어 / 4개국어 / 5개국어** 프리셋 버튼을 눌러 원클릭으로 선택할 수 있습니다.\n\n"
+        "선택을 마치신 후 하단의 **[✅ 설정 완료 (적용하기)]** 를 눌러주세요:\n\n"
+        "• 🇰🇷🇺🇸🇻🇳 **3개국어** : 한국어 ↔ 영어, 베트남어 실시간 번역\n"
+        "• 🇰🇷🇺🇸🇻🇳🇨🇳 **4개국어** : 한국어 ↔ 영어, 베트남어, 중국어 실시간 번역\n"
         "• 🌐 **5개국어 전체** : 한국어 ↔ 4개국 외국어 동시 번역\n\n"
-        "*(명령어로도 즉시 설정 가능: `/lang all`, `/lang en vi`)*\n\n"
+        "*(명령어로도 즉시 설정 가능: `/lang 3`, `/lang 4`, `/lang all`, `/lang en vi`)*\n\n"
         "⚠️ *대화방 관리자(방장/어드민)만 설정할 수 있습니다.*"
     )
 
 
 def get_lang_mode_display_name(mode: str) -> str:
-    """언어 모드 코드에 대응하는 사용자 친화적 명칭 반환"""
+    """언어 모드 코드에 대응하는 사용자 친화적 명칭 반환 (개수 및 국가 명확화)"""
     active = parse_active_languages(mode)
     if len(active) == len(ORDERED_TARGET_LANGS):
         return "🌐 5개국어 전체 (한·영·베·중·스)"
     if active == {"en"}:
-        return "🇺🇸 한-영 (English)"
+        return "🇺🇸 한-영 (2개국어)"
     if active == {"vi"}:
-        return "🇻🇳 한-베 (Tiếng Việt)"
+        return "🇻🇳 한-베 (2개국어)"
     if active == {"zh"}:
-        return "🇨🇳 한-중 (中文)"
+        return "🇨🇳 한-중 (2개국어)"
     if active == {"es"}:
-        return "🇪🇸 한-스 (Español)"
+        return "🇪🇸 한-스 (2개국어)"
+    if active == {"en", "vi"}:
+        return "🇰🇷🇺🇸🇻🇳 3개국어 (한·영·베)"
+    if active == {"en", "vi", "zh"}:
+        return "🇰🇷🇺🇸🇻🇳🇨🇳 4개국어 (한·영·베·중)"
     if not active:
         return "⚠️ 선택된 언어 없음"
 
-    names = [
-        f"{SUPPORTED_TARGET_LANGUAGES[k]['flag']} {SUPPORTED_TARGET_LANGUAGES[k]['name']}"
-        for k in ORDERED_TARGET_LANGS
-        if k in active
-    ]
-    return " + ".join(names) + " (다중 선택)"
+    flags = "".join([SUPPORTED_TARGET_LANGUAGES[k]["flag"] for k in ORDERED_TARGET_LANGS if k in active])
+    names = [SUPPORTED_TARGET_LANGUAGES[k]["name"][:2] for k in ORDERED_TARGET_LANGS if k in active]
+    total_count = len(active) + 1
+    return f"🇰🇷{flags} {total_count}개국어 (한·{'·'.join(names)})"
 
 
 def get_cached_message_text(chat_id: int, message_id: int) -> Optional[str]:
@@ -615,6 +625,41 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.warning(f"Failed to edit message in tgl_all: {e}")
         return
 
+    # 2-1. 프리셋(3개국어, 4개국어, 5개국어) 원클릭 선택
+    elif action == "set_preset":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+        preset_type = parts[2]
+
+        if not await _check_group_perm(target_chat_id):
+            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            return
+
+        if preset_type == "3":
+            current_set = {"en", "vi"}
+            label = "3개국어 (한·영·베)"
+        elif preset_type == "4":
+            current_set = {"en", "vi", "zh"}
+            label = "4개국어 (한·영·베·중)"
+        elif preset_type == "5":
+            current_set = set(ORDERED_TARGET_LANGS)
+            label = "5개국어 전체"
+        else:
+            current_set = {"en"}
+            label = "한-영"
+
+        PENDING_LANG_SELECTIONS[target_chat_id] = set(current_set)
+        new_text = build_lang_card_text(current_set)
+        new_markup = build_lang_keyboard(target_chat_id, current_set)
+
+        try:
+            await query.edit_message_text(new_text, reply_markup=new_markup, parse_mode="Markdown")
+            await query.answer(f"{label} 프리셋이 선택되었습니다. 하단의 [설정 완료]를 눌러주세요!")
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logger.warning(f"Failed to edit message in set_preset: {e}")
+        return
+
     # 3. 설정 완료 (적용하기)
     elif action == "save_lang":
         parts = data.split(":")
@@ -776,84 +821,67 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             pass
 
-    # 4. 총괄 관리자 1:1 DM 그룹 원격 제어 패널 (sel_grp, adm_lang, adm_toggle, adm_back)
+    # 4. 총괄 관리자 1:1 DM 그룹 원격 제어 패널 (sel_grp, adm_tgl, adm_lang, adm_toggle, adm_back)
     elif action == "sel_grp":
         target_chat_id = int(data.split(":")[1])
+        card_text, reply_markup = build_admin_group_card(target_chat_id)
+        await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
+
+    elif action == "adm_tgl":
+        parts = data.split(":")
+        target_chat_id = int(parts[1])
+        lang_code = parts[2]
         conf = db.get_group_config(target_chat_id)
-        groups = db.get_all_groups()
-        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
-        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
-        safe_title = html.escape(title)
+        current_set = set(parse_active_languages(conf.get("lang_mode", "all")))
 
-        mode_str = get_lang_mode_display_name(conf.get("lang_mode", "all"))
-        switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
+        if lang_code in current_set:
+            if len(current_set) <= 1:
+                await query.answer("⚠️ 최소 1개 이상의 번역 언어가 선택되어 있어야 합니다.", show_alert=True)
+                return
+            current_set.remove(lang_code)
+        else:
+            current_set.add(lang_code)
 
-        card_text = (
-            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
-            f"• 식별 ID: <code>{target_chat_id}</code>\n"
-            f"• 현재 언어 모드: <b>{mode_str}</b>\n"
-            f"• 번역 스위치: <b>{switch_str}</b>\n\n"
-            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
-        )
-        card_kb = [
-            [
-                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
-                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
-            ],
-            [
-                InlineKeyboardButton("🇨🇳 한-중", callback_data=f"adm_lang:{target_chat_id}:ko-zh"),
-                InlineKeyboardButton("🇪🇸 한-스", callback_data=f"adm_lang:{target_chat_id}:ko-es"),
-            ],
-            [
-                InlineKeyboardButton("🌐 3개국어 전체", callback_data=f"adm_lang:{target_chat_id}:all"),
-            ],
-            [
-                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
-                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
-            ]
-        ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
+        if len(current_set) == len(ORDERED_TARGET_LANGS):
+            new_mode = "all"
+        elif current_set == {"en"}:
+            new_mode = "ko-en"
+        elif current_set == {"vi"}:
+            new_mode = "ko-vi"
+        elif current_set == {"zh"}:
+            new_mode = "ko-zh"
+        elif current_set == {"es"}:
+            new_mode = "ko-es"
+        else:
+            new_mode = ",".join([k for k in ORDERED_TARGET_LANGS if k in current_set])
+
+        db.update_group_config(target_chat_id, lang_mode=new_mode)
+        mode_str = get_lang_mode_display_name(new_mode)
+        await query.answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!")
+
+        card_text, reply_markup = build_admin_group_card(target_chat_id)
+        await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
 
     elif action == "adm_lang":
         parts = data.split(":")
         target_chat_id = int(parts[1])
-        new_mode = parts[2]
+        target_code = parts[2]
+
+        if target_code == "3":
+            new_mode = "en,vi"
+        elif target_code == "4":
+            new_mode = "en,vi,zh"
+        elif target_code == "all":
+            new_mode = "all"
+        else:
+            new_mode = target_code
+
         db.update_group_config(target_chat_id, lang_mode=new_mode)
         mode_str = get_lang_mode_display_name(new_mode)
         await query.answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!", show_alert=True)
 
-        conf = db.get_group_config(target_chat_id)
-        groups = db.get_all_groups()
-        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
-        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
-        safe_title = html.escape(title)
-        switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
-
-        card_text = (
-            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
-            f"• 식별 ID: <code>{target_chat_id}</code>\n"
-            f"• 현재 언어 모드: <b>{mode_str}</b> (변경 완료 ✅)\n"
-            f"• 번역 스위치: <b>{switch_str}</b>\n\n"
-            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
-        )
-        card_kb = [
-            [
-                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
-                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
-            ],
-            [
-                InlineKeyboardButton("🇨🇳 한-중", callback_data=f"adm_lang:{target_chat_id}:ko-zh"),
-                InlineKeyboardButton("🇪🇸 한-스", callback_data=f"adm_lang:{target_chat_id}:ko-es"),
-            ],
-            [
-                InlineKeyboardButton("🌐 3개국어 전체", callback_data=f"adm_lang:{target_chat_id}:all"),
-            ],
-            [
-                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
-                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
-            ]
-        ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
+        card_text, reply_markup = build_admin_group_card(target_chat_id)
+        await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
 
     elif action == "adm_toggle":
         target_chat_id = int(data.split(":")[1])
@@ -862,36 +890,93 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         db.update_group_config(target_chat_id, is_enabled=new_state)
         await query.answer(f"번역 스위치가 {'ON' if new_state else 'OFF'} 되었습니다.", show_alert=True)
 
-        groups = db.get_all_groups()
-        target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
-        title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
-        safe_title = html.escape(title)
-        mode_str = {"ko-en": "🇺🇸 한-영", "ko-vi": "🇻🇳 한-베", "all": "🌐 3개국어"}.get(conf.get("lang_mode"), conf.get("lang_mode", "all"))
-        switch_str = "🟢 켜짐(ON)" if new_state else "⚪ 꺼짐(OFF)"
+        card_text, reply_markup = build_admin_group_card(target_chat_id)
+        await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
 
-        card_text = (
-            f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
-            f"• 식별 ID: <code>{target_chat_id}</code>\n"
-            f"• 현재 언어 모드: <b>{mode_str}</b>\n"
-            f"• 번역 스위치: <b>{switch_str}</b> (변경 완료 ✅)\n\n"
-            "변경하실 언어 모드나 스위치 버튼을 눌러주세요:"
+    elif action == "adm_export_map":
+        mapping = db.export_group_lang_map()
+        if not mapping:
+            await query.answer("등록된 대화방 설정이 없습니다.", show_alert=True)
+            return
+        compact_str = ", ".join([f"{k}:{v}" for k, v in mapping.items()])
+        export_text = (
+            "📋 <b>Render 재배포 영구 보존용 환경변수</b>\n\n"
+            "Render 서버가 업데이트되어 재배포되더라도 방별 번역 설정이 날아가지 않도록 "
+            "Render 대시보드에 아래 환경변수를 1회 등록해 두시면 됩니다:\n\n"
+            "<b>[설정 방법]</b>\n"
+            "1. Render 대시보드 ➡️ 해당 Web Service ➡️ <b>Environment</b> 탭\n"
+            "2. <b>Add Environment Variable</b> 클릭\n"
+            "3. <b>Key</b>: <code>GROUP_LANG_MAP</code>\n"
+            f"4. <b>Value</b>:\n<code>{html.escape(compact_str)}</code>\n\n"
+            "💡 <i>위 Value 코드 블록을 터치하여 복사한 뒤 Render 환경변수에 붙여넣으시면, "
+            "앞으로 깃허브에 코드를 업데이트해도 모든 방의 설정이 영구 보존됩니다!</i>"
         )
-        card_kb = [
-            [
-                InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
-                InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
-                InlineKeyboardButton("🌐 3개국어", callback_data=f"adm_lang:{target_chat_id}:all"),
-            ],
-            [
-                InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
-                InlineKeyboardButton("🔙 목록으로", callback_data="adm_back:0"),
-            ]
-        ]
-        await query.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(card_kb), parse_mode="HTML")
+        back_kb = [[InlineKeyboardButton("🔙 대화방 목록으로", callback_data="adm_back:0")]]
+        await query.edit_message_text(export_text, reply_markup=InlineKeyboardMarkup(back_kb), parse_mode="HTML")
 
     elif action == "adm_back":
         text, reply_markup = build_groups_menu()
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+def build_admin_group_card(target_chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """총괄 관리자용 대화방 원격 설정 상세 카드 (체크박스 토글 + 3/4/5개국어 원클릭 프리셋)"""
+    conf = db.get_group_config(target_chat_id)
+    groups = db.get_all_groups()
+    target_grp = next((g for g in groups if g["chat_id"] == target_chat_id), None)
+    title = target_grp["title"] if target_grp else f"대화방 {target_chat_id}"
+    safe_title = html.escape(title)
+
+    current_mode = conf.get("lang_mode", "all")
+    active_langs = parse_active_languages(current_mode)
+    mode_str = get_lang_mode_display_name(current_mode)
+    switch_str = "🟢 켜짐(ON)" if conf.get("is_enabled", True) else "⚪ 꺼짐(OFF)"
+
+    card_text = (
+        f"⚙️ <b>대화방 원격 설정: {safe_title}</b>\n\n"
+        f"• 식별 ID: <code>{target_chat_id}</code>\n"
+        f"• 현재 언어 모드: <b>{mode_str}</b>\n"
+        f"• 번역 스위치: <b>{switch_str}</b>\n\n"
+        "원하시는 <b>원클릭 프리셋(3·4·5개국어)</b>을 누르시거나,\n"
+        "<b>언어별 체크박스</b>를 직접 눌러 원하는 언어만 골라 실시간 적용할 수 있습니다:"
+    )
+
+    def _chk(code: str, label: str):
+        icon = "☑️" if code in active_langs else "⬜"
+        return InlineKeyboardButton(f"{icon} {label}", callback_data=f"adm_tgl:{target_chat_id}:{code}")
+
+    card_kb = [
+        # 1. 개별 언어 실시간 체크박스 토글 (다중 선택)
+        [
+            _chk("en", "🇺🇸 영어"),
+            _chk("vi", "🇻🇳 베트남어"),
+        ],
+        [
+            _chk("zh", "🇨🇳 중국어"),
+            _chk("es", "🇪🇸 스페인어"),
+        ],
+        # 2. 다국어 원클릭 핵심 프리셋
+        [
+            InlineKeyboardButton("🇰🇷🇺🇸🇻🇳 3개국어 (한·영·베)", callback_data=f"adm_lang:{target_chat_id}:3"),
+            InlineKeyboardButton("🇰🇷🇺🇸🇻🇳🇨🇳 4개국어 (한·영·베·중)", callback_data=f"adm_lang:{target_chat_id}:4"),
+        ],
+        [
+            InlineKeyboardButton("🌐 5개국어 전체 (한·영·베·중·스)", callback_data=f"adm_lang:{target_chat_id}:all"),
+        ],
+        # 3. 2개국어 단독 모드
+        [
+            InlineKeyboardButton("🇺🇸 한-영", callback_data=f"adm_lang:{target_chat_id}:ko-en"),
+            InlineKeyboardButton("🇻🇳 한-베", callback_data=f"adm_lang:{target_chat_id}:ko-vi"),
+            InlineKeyboardButton("🇨🇳 한-중", callback_data=f"adm_lang:{target_chat_id}:ko-zh"),
+            InlineKeyboardButton("🇪🇸 한-스", callback_data=f"adm_lang:{target_chat_id}:ko-es"),
+        ],
+        # 4. 제어 스위치 및 뒤로가기
+        [
+            InlineKeyboardButton("⚡ 번역 ON/OFF", callback_data=f"adm_toggle:{target_chat_id}"),
+            InlineKeyboardButton("🔙 대화방 목록", callback_data="adm_back:0"),
+        ]
+    ]
+    return card_text, InlineKeyboardMarkup(card_kb)
 
 
 def build_groups_menu():
@@ -902,12 +987,11 @@ def build_groups_menu():
 
     lines = ["📋 <b>봇 연결 그룹 대화방 목록 및 원격 제어</b>\n"]
     keyboard = []
-    mode_names = {"ko-en": "🇺🇸한영", "ko-vi": "🇻🇳한베", "ko-zh": "🇨🇳한중", "ko-es": "🇪🇸한스", "all": "🌐3개국어"}
 
     for idx, g in enumerate(groups, 1):
         status_icon = "🟢 승인됨" if g["is_allowed"] else "🟡 대기중"
         forum_badge = " (포럼)" if g["is_forum"] else ""
-        m_name = mode_names.get(g["lang_mode"], g["lang_mode"])
+        m_name = get_lang_mode_display_name(g["lang_mode"])
         sw_name = "ON" if g["is_enabled"] else "OFF"
         safe_title = html.escape(g['title'] or '이름 없음')
         lines.append(
@@ -920,9 +1004,14 @@ def build_groups_menu():
             InlineKeyboardButton(f"⚙️ {idx}. {title_btn} 설정", callback_data=f"sel_grp:{g['chat_id']}")
         ])
 
+    keyboard.append([
+        InlineKeyboardButton("📋 Render 영구보존 설정 복사 (GROUP_LANG_MAP)", callback_data="adm_export_map:0")
+    ])
+
     lines.append(
-        "💡 <b>원격 관리</b>: 위 버튼을 누르면 해당 방의 언어(<code>한영/한베/한중/한스/3개국어</code>)와 번역 스위치를 즉시 변경할 수 있습니다.\n"
-        "• 명령어로 변경: <code>/set_lang [대화방ID] [all | ko-en | ko-vi | ko-zh | ko-es]</code>"
+        "💡 <b>원격 관리</b>: 위 방 설정 버튼을 누르면 해당 방의 언어(3·4·5개국어 프리셋 및 체크박스)와 번역 스위치를 즉시 변경할 수 있습니다.\n"
+        "• 명령어로 변경: <code>/set_lang [대화방ID] [3 | 4 | all | ko-en | ko-vi]</code>\n"
+        "• 영구 보존: 하단 <b>[Render 영구보존 설정 복사]</b> 버튼을 눌러 Render 환경변수에 등록하세요."
     )
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
@@ -956,7 +1045,7 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """총괄 관리자 전용: 특정 대화방의 번역 언어 모드 원격 변경"""
+    """총괄 관리자 전용: 특정 대화방의 번역 언어 모드 원격 변경 (단일/3개국어/4개국어/5개국어/다중선택 완벽 지원)"""
     user = update.effective_user
     message = update.effective_message
     if not message:
@@ -975,41 +1064,109 @@ async def cmd_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await safe_reply(
             message,
-            "사용법: `/set_lang [대화방ID] [all | ko-en | ko-vi | ko-zh | ko-es]`\n"
-            "예시: `/set_lang -100123456789 ko-en`\n\n"
-            "• `all` : 3개국어 (한국어 ↔ 영어 ↔ 베트남어)\n"
-            "• `ko-en` : 한-영 전용 (한국어 ↔ 영어)\n"
-            "• `ko-vi` : 한-베 전용 (한국어 ↔ 베트남어)\n"
-            "• `ko-zh` : 한-중 전용 (한국어 ↔ 중국어)\n"
-            "• `ko-es` : 한-스 전용 (한국어 ↔ 스페인어)",
+            "💡 **대화방 언어 모드 원격 설정 사용법**:\n"
+            "• `/set_lang [대화방ID] [모드]`\n\n"
+            "**[사용 가능한 모드]**\n"
+            "• `3` 또는 `3개국어` : 🇰🇷🇺🇸🇻🇳 3개국어 (한국어 ↔ 영어, 베트남어)\n"
+            "• `4` 또는 `4개국어` : 🇰🇷🇺🇸🇻🇳🇨🇳 4개국어 (한국어 ↔ 영어, 베트남어, 중국어)\n"
+            "• `5` 또는 `all` : 🌐 5개국어 전체 (한국어 ↔ 영어, 베트남어, 중국어, 스페인어)\n"
+            "• `ko-en` : 🇺🇸 한-영 (한국어 ↔ 영어)\n"
+            "• `ko-vi` : 🇻🇳 한-베 (한국어 ↔ 베트남어)\n"
+            "• `ko-zh` : 🇨🇳 한-중 (한국어 ↔ 중국어)\n"
+            "• `ko-es` : 🇪🇸 한-스 (한국어 ↔ 스페인어)\n"
+            "• `en vi zh` : 임의 다중 언어 조합 지정\n\n"
+            "예시: `/set_lang -100123456789 3`\n"
+            "예시: `/set_lang -100123456789 4`\n"
+            "예시: `/set_lang -100123456789 ko-en`",
             parse_mode="Markdown"
         )
         return
 
     try:
         target_chat_id = int(args[0].strip())
-        raw_mode = args[1].strip().lower()
-        mode_map = {
-            "all": "all", "전체": "all", "3개국어": "all",
-            "ko-en": "ko-en", "koen": "ko-en", "한영": "ko-en", "영어": "ko-en",
-            "ko-vi": "ko-vi", "kovi": "ko-vi", "한베": "ko-vi", "베트남": "ko-vi", "베트남어": "ko-vi",
-            "ko-zh": "ko-zh", "kozh": "ko-zh", "한중": "ko-zh", "중국": "ko-zh", "중국어": "ko-zh",
-            "ko-es": "ko-es", "koes": "ko-es", "한스": "ko-es", "스페인": "ko-es", "스페인어": "ko-es"
-        }
-        if raw_mode not in mode_map:
-            await safe_reply(message, "지원 언어 모드: `all`, `ko-en`, `ko-vi`, `ko-zh`, `ko-es`")
+        raw_mode_str = " ".join(args[1:]).strip().lower()
+
+        # 3개국어 / 4개국어 / 5개국어 및 임의 조합 파싱
+        if raw_mode_str in ["3", "3개국어", "3국어", "ko-en-vi"]:
+            active = {"en", "vi"}
+        elif raw_mode_str in ["4", "4개국어", "4국어", "ko-en-vi-zh"]:
+            active = {"en", "vi", "zh"}
+        elif raw_mode_str in ["all", "5", "5개국어", "전체", "모두"]:
+            active = set(ORDERED_TARGET_LANGS)
+        elif raw_mode_str in ["ko-en", "en", "영어"]:
+            active = {"en"}
+        elif raw_mode_str in ["ko-vi", "vi", "베트남어"]:
+            active = {"vi"}
+        elif raw_mode_str in ["ko-zh", "zh", "중국어"]:
+            active = {"zh"}
+        elif raw_mode_str in ["ko-es", "es", "스페인어"]:
+            active = {"es"}
+        else:
+            active = parse_active_languages(raw_mode_str)
+
+        if not active:
+            await safe_reply(message, "⚠️ 유효한 언어가 지정되지 않았습니다. (예: `3`, `4`, `all`, `ko-en`, `ko-vi`, `en vi`)", parse_mode="Markdown")
             return
 
-        target_mode = mode_map[raw_mode]
+        if len(active) == len(ORDERED_TARGET_LANGS):
+            target_mode = "all"
+        elif active == {"en"}:
+            target_mode = "ko-en"
+        elif active == {"vi"}:
+            target_mode = "ko-vi"
+        elif active == {"zh"}:
+            target_mode = "ko-zh"
+        elif active == {"es"}:
+            target_mode = "ko-es"
+        else:
+            target_mode = ",".join([k for k in ORDERED_TARGET_LANGS if k in active])
+
         db.update_group_config(target_chat_id, lang_mode=target_mode)
         mode_display = get_lang_mode_display_name(target_mode)
         await safe_reply(
             message,
-            f"✅ 대화방(`{target_chat_id}`)의 언어 모드가 **{mode_display} (`{target_mode}`)**으로 원격 변경되었습니다.",
+            f"✅ 대화방(`{target_chat_id}`)의 번역 모드가 **{mode_display}** (`{target_mode}`)로 원격 변경되었습니다.",
             parse_mode="Markdown"
         )
     except Exception as e:
         await safe_reply(message, f"오류 발생: {e}")
+
+
+async def cmd_export_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """총괄 관리자 전용: Render 재배포 영구 보존용 환경변수 설정값(GROUP_LANG_MAP) 원클릭 추출"""
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if not message:
+        return
+
+    if chat.type != "private":
+        await safe_reply(message, "🔒 이 명령어는 봇과의 1:1 개인 대화창(DM)에서만 사용 가능합니다.")
+        return
+
+    if not is_admin(user.id):
+        await safe_reply(message, "⚠️ 총괄 관리자 권한이 필요합니다.")
+        return
+
+    mapping = db.export_group_lang_map()
+    if not mapping:
+        await safe_reply(message, "현재 등록된 대화방 설정이 없습니다.")
+        return
+
+    compact_str = ", ".join([f"{k}:{v}" for k, v in mapping.items()])
+    msg = (
+        "📋 <b>Render 재배포 영구 보존용 환경변수 (GROUP_LANG_MAP)</b>\n\n"
+        "Render 서버가 업데이트되어 재배포되더라도 방별 번역 설정이 날아가지 않도록 "
+        "Render 대시보드에 아래 환경변수를 1회 등록해 두시면 됩니다:\n\n"
+        "<b>[설정 방법]</b>\n"
+        "1. Render 대시보드 ➡️ 해당 Web Service ➡️ <b>Environment</b> 탭\n"
+        "2. <b>Add Environment Variable</b> 클릭\n"
+        "3. <b>Key</b>: <code>GROUP_LANG_MAP</code>\n"
+        f"4. <b>Value</b>:\n<code>{html.escape(compact_str)}</code>\n\n"
+        "💡 <i>위 Value 코드 블록을 터치하여 복사한 뒤 Render 환경변수에 붙여넣으세요.</i>"
+    )
+    await safe_reply(message, msg, parse_mode="HTML")
 
 
 async def cmd_approve_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2090,6 +2247,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("groups", cmd_groups))
+    app.add_handler(CommandHandler("export_settings", cmd_export_settings))
     app.add_handler(CommandHandler("approve_group", cmd_approve_group))
     app.add_handler(CommandHandler("ban_group", cmd_ban_group))
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))

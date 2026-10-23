@@ -48,6 +48,14 @@ class TestSecurityCompliantTranslator(unittest.TestCase):
         targets_3langs = get_translation_targets("KO", mode="en,vi,zh")
         self.assertEqual(targets_3langs, [("en", "🇺🇸"), ("vi", "🇻🇳"), ("zh-CN", "🇨🇳")])
 
+        # 3개국어 프리셋 (한국어 ↔ 영어, 베트남어)
+        targets_3 = get_translation_targets("KO", mode="3")
+        self.assertEqual(targets_3, [("en", "🇺🇸"), ("vi", "🇻🇳")])
+
+        # 4개국어 프리셋 (한국어 ↔ 영어, 베트남어, 중국어)
+        targets_4 = get_translation_targets("KO", mode="4")
+        self.assertEqual(targets_4, [("en", "🇺🇸"), ("vi", "🇻🇳"), ("zh-CN", "🇨🇳")])
+
     def test_target_languages_chinese_and_spanish_modes(self):
         # 한-중 모드 테스트
         targets_zh_ko = get_translation_targets("KO", mode="ko-zh")
