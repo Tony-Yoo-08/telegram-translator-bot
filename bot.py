@@ -53,11 +53,13 @@ from translator import (
 )
 from glossary import GlossaryManager
 
-# S8: 로그 마스킹 및 최소 로깅 설정
+# S8: 로그 마스킹 및 최소 로깅 설정 (httpx URL 내 봇 토큰 노출 원천 차단)
 logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("AppLogger")
 
 # S1: 환경변수 로드
@@ -99,6 +101,8 @@ DUPLICATE_TEXT_WINDOW_SECONDS = 30  # 30초 이내 동일 사용자 중복 방�
 PENDING_LANG_PROMPTS: Dict[int, int] = {}
 # 5. 다중 선택 체크박스 임시 상태 캐시: chat_id -> Set[str] (예: {'en', 'vi'})
 PENDING_LANG_SELECTIONS: Dict[int, Set[str]] = {}
+# 6. 대화방 초대자 또는 언어 설정 요청자 캐시: chat_id -> user_id
+PENDING_LANG_INVITERS: Dict[int, int] = {}
 
 
 def build_lang_keyboard(chat_id: int, current_set: Optional[Set[str]] = None) -> InlineKeyboardMarkup:
@@ -171,7 +175,7 @@ def build_lang_card_text(current_set: Set[str]) -> str:
         "• 🇰🇷🇺🇸🇻🇳🇨🇳 **4개국어** : 한국어 ↔ 영어, 베트남어, 중국어 실시간 번역\n"
         "• 🌐 **5개국어 전체** : 한국어 ↔ 4개국 외국어 동시 번역\n\n"
         "*(명령어로도 즉시 설정 가능: `/lang 3`, `/lang 4`, `/lang all`, `/lang en vi`)*\n\n"
-        "⚠️ *대화방 관리자(방장/어드민)만 설정할 수 있습니다.*"
+        "💡 *대화방 관리자 또는 봇 초대자가 언어를 선택하고 적용할 수 있습니다.*"
     )
 
 
@@ -384,13 +388,27 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if user.id in [1087968824, 136817688] or getattr(user, "username", "") == "GroupAnonymousBot":
         return True
 
-    # 3. 텔레그램 자체 그룹 방장(creator) 또는 관리자(administrator)인 경우
+    # 3. 승인된 봇 멤버인 경우
+    if is_approved_member(user.id):
+        return True
+
+    # 4. 텔레그램 자체 그룹 방장(creator) 또는 관리자(administrator)인 경우
     try:
         member = await context.bot.get_chat_member(chat_id=chat.id, user_id=user.id)
-        return member.status in ["creator", "administrator"]
+        if member.status in ["creator", "administrator"]:
+            return True
     except Exception as e:
-        logger.warning(f"Could not verify chat member: {e}")
-        return is_admin(user.id)
+        logger.warning(f"Could not verify chat member via get_chat_member: {e}")
+
+    # 5. 일반 그룹 등 get_chat_member 실패 시 get_chat_administrators 폴백 시도
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        if any(a.user.id == user.id for a in admins):
+            return True
+    except Exception as e:
+        logger.warning(f"Could not verify chat member via get_chat_administrators: {e}")
+
+    return False
 
 
 async def notify_admins_new_group(chat, inviter, context: ContextTypes.DEFAULT_TYPE):
@@ -460,19 +478,36 @@ async def track_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYP
                     PENDING_LANG_SELECTIONS[chat.id] = set(init_set)
                     guide_text = build_lang_card_text(init_set)
                     reply_markup = build_lang_keyboard(chat.id, init_set)
-                    prompt_msg = await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=guide_text,
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
-                    )
+                    try:
+                        prompt_msg = await context.bot.send_message(
+                            chat_id=chat.id,
+                            text=guide_text,
+                            reply_markup=reply_markup,
+                            parse_mode="Markdown"
+                        )
+                    except Exception as e_send:
+                        if is_forum:
+                            prompt_msg = await context.bot.send_message(
+                                chat_id=chat.id,
+                                text=guide_text,
+                                reply_markup=reply_markup,
+                                parse_mode="Markdown",
+                                message_thread_id=1
+                            )
+                        else:
+                            raise e_send
+
                     if prompt_msg:
                         PENDING_LANG_PROMPTS[chat.id] = prompt_msg.message_id
+                        if inviter and getattr(inviter, "id", None):
+                            PENDING_LANG_INVITERS[chat.id] = inviter.id
                 except Exception as e:
                     logger.warning(f"Failed to send onboarding lang prompt to chat {chat.id}: {e}")
         elif new_status in ["left", "kicked"]:
             db.delete_group(chat.id)
             PENDING_LANG_PROMPTS.pop(chat.id, None)
+            PENDING_LANG_SELECTIONS.pop(chat.id, None)
+            PENDING_LANG_INVITERS.pop(chat.id, None)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -545,25 +580,65 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """인라인 버튼 클릭 처리 (대화방 언어 선택, 멤버 승인 및 그룹 원격 제어)"""
     query = update.callback_query
-    await query.answer()
+    has_answered = False
+
+    async def safe_answer(*args, **kwargs):
+        nonlocal has_answered
+        if not has_answered:
+            try:
+                await query.answer(*args, **kwargs)
+                has_answered = True
+            except Exception as e:
+                logger.debug(f"query.answer failed: {e}")
 
     user = update.effective_user
     data = query.data or ""
     if ":" not in data:
+        await safe_answer()
         return
 
     action = data.split(":", 1)[0]
 
     async def _check_group_perm(target_chat_id: int) -> bool:
+        # 1. 봇 총괄 관리자 (DB 등록 또는 .env 비상 관리자)
         if is_admin(user.id):
             return True
+
+        # 2. 텔레그램 익명 관리자 모드
         if user.id in [1087968824, 136817688] or getattr(user, "username", "") == "GroupAnonymousBot":
             return True
+
+        # 3. 승인된 봇 멤버
+        if is_approved_member(user.id):
+            return True
+
+        # 4. 해당 방에 봇을 직접 초대한 사용자 (또는 설정을 요청한 사용자)
+        if PENDING_LANG_INVITERS.get(target_chat_id) == user.id:
+            return True
+
+        # 5. 신규 초대 후 초기 언어 설정 대기 중인 온보딩 카드인 경우:
+        # 일반 그룹에서 봇이 관리자가 아니면 텔레그램 API get_chat_member 조회가 불가능(Chat_admin_required)하므로
+        # 신규 초대 온보딩 단계에서는 대화방 참여자가 언어 설정을 확정할 수 있도록 허용
+        if target_chat_id in PENDING_LANG_PROMPTS:
+            return True
+
+        # 6. 텔레그램 그룹 관리자 확인: get_chat_member 시도
         try:
             member = await context.bot.get_chat_member(target_chat_id, user.id)
-            return member.status in ["creator", "administrator"]
-        except Exception:
-            return False
+            if member.status in ["creator", "administrator"]:
+                return True
+        except Exception as e:
+            logger.debug(f"get_chat_member check failed: {e}")
+
+        # 7. 일반 그룹 등 get_chat_member 실패 시 get_chat_administrators 폴백 시도
+        try:
+            admins = await context.bot.get_chat_administrators(target_chat_id)
+            if any(a.user.id == user.id for a in admins):
+                return True
+        except Exception as e:
+            logger.debug(f"get_chat_administrators check failed: {e}")
+
+        return False
 
     # 1. 다중 선택 체크박스 토글 (개별 언어 on/off)
     if action == "tgl_lang":
@@ -572,7 +647,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         lang_code = parts[2]
 
         if not await _check_group_perm(target_chat_id):
-            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            await safe_answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
             return
 
         if target_chat_id not in PENDING_LANG_SELECTIONS:
@@ -593,6 +668,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             if "message is not modified" not in str(e).lower():
                 logger.warning(f"Failed to edit message in tgl_lang: {e}")
+        await safe_answer()
         return
 
     # 2. 5개국어 전체 선택 / 전체 해제 토글
@@ -601,7 +677,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         target_chat_id = int(parts[1])
 
         if not await _check_group_perm(target_chat_id):
-            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            await safe_answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
             return
 
         if target_chat_id not in PENDING_LANG_SELECTIONS:
@@ -623,6 +699,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             if "message is not modified" not in str(e).lower():
                 logger.warning(f"Failed to edit message in tgl_all: {e}")
+        await safe_answer()
         return
 
     # 2-1. 프리셋(3개국어, 4개국어, 5개국어) 원클릭 선택
@@ -632,7 +709,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         preset_type = parts[2]
 
         if not await _check_group_perm(target_chat_id):
-            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
+            await safe_answer("대화방 관리자(방장/어드민)만 언어 설정을 변경할 수 있습니다.", show_alert=True)
             return
 
         if preset_type == "3":
@@ -654,7 +731,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         try:
             await query.edit_message_text(new_text, reply_markup=new_markup, parse_mode="Markdown")
-            await query.answer(f"{label} 프리셋이 선택되었습니다. 하단의 [설정 완료]를 눌러주세요!")
+            await safe_answer(f"{label} 프리셋이 선택되었습니다. 하단의 [설정 완료]를 눌러주세요!")
         except Exception as e:
             if "message is not modified" not in str(e).lower():
                 logger.warning(f"Failed to edit message in set_preset: {e}")
@@ -666,7 +743,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         target_chat_id = int(parts[1])
 
         if not await _check_group_perm(target_chat_id):
-            await query.answer("대화방 관리자(방장/어드민)만 언어 설정을 저장할 수 있습니다.", show_alert=True)
+            await safe_answer("대화방 관리자(방장/어드민)만 언어 설정을 저장할 수 있습니다.", show_alert=True)
             return
 
         if target_chat_id not in PENDING_LANG_SELECTIONS:
@@ -675,7 +752,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         current_set = PENDING_LANG_SELECTIONS[target_chat_id]
         if not current_set:
-            await query.answer("⚠️ 최소 1개 이상의 번역 언어를 체크해 주세요!", show_alert=True)
+            await safe_answer("⚠️ 최소 1개 이상의 번역 언어를 체크해 주세요!", show_alert=True)
             return
 
         if len(current_set) == len(ORDERED_TARGET_LANGS):
@@ -687,38 +764,59 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         db.update_group_config(target_chat_id, lang_mode=saved_mode)
         PENDING_LANG_PROMPTS.pop(target_chat_id, None)
         PENDING_LANG_SELECTIONS.pop(target_chat_id, None)
+        PENDING_LANG_INVITERS.pop(target_chat_id, None)
 
         mode_name = get_lang_mode_display_name(saved_mode)
+        await safe_answer("✅ 언어 설정이 적용되었습니다.")
 
-        # 1. 안내 메시지 카드 자동 삭제 (대화방 정리)
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        confirmed_text = (
+            f"✅ **대화방 번역 설정이 완료되었습니다!**\n\n"
+            f"• 적용된 번역 모드: **{mode_name}**\n"
+            f"• 이제 대화방에 메시지를 올리시면 실시간 자동 번역됩니다.\n\n"
+            f"💡 **사용 팁**:\n"
+            f"• 언제든 언어 변경: `/lang`\n"
+            f"• 대화방 기능 및 명령어 확인: `/help`"
+        )
 
-        # 2. 간결한 완료 메시지 전송 후 7초 뒤 자동 정리
+        msg_updated = False
         try:
-            sent_notice = await context.bot.send_message(
-                chat_id=target_chat_id,
-                text=(
-                    f"✅ 대화방 번역 모드가 **{mode_name}**(으)로 설정되었습니다.\n\n"
-                    f"• 이제 대화방에 메시지를 올리시면 실시간 자동 번역됩니다.\n\n"
-                    f"💡 **사용 팁**:\n"
-                    f"• 언제든 언어 변경: `/lang`\n"
-                    f"• 대화방 기능 및 명령어 확인: `/help`"
-                ),
+            await query.edit_message_text(
+                confirmed_text,
+                reply_markup=None,
                 parse_mode="Markdown"
             )
-            if sent_notice:
-                async def _cleanup(msg):
-                    await asyncio.sleep(7)
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                asyncio.create_task(_cleanup(sent_notice))
-        except Exception as e:
-            logger.warning(f"Failed to send save confirmation notice: {e}")
+            msg_updated = True
+        except Exception:
+            try:
+                clean_text = confirmed_text.replace("**", "").replace("`", "")
+                await query.edit_message_text(clean_text, reply_markup=None)
+                msg_updated = True
+            except Exception as e2:
+                logger.warning(f"Failed to edit message in save_lang: {e2}")
+
+        if not msg_updated:
+            try:
+                thread_id = getattr(query.message, "message_thread_id", None)
+                kwargs = {"parse_mode": "Markdown"}
+                if thread_id:
+                    kwargs["message_thread_id"] = thread_id
+                await context.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=confirmed_text,
+                    **kwargs
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send save confirmation notice: {e}")
+
+        # 10초 뒤 안내 카드 자동 정리 (대화방 깔끔하게 유지)
+        if query.message:
+            async def _cleanup(msg):
+                await asyncio.sleep(10)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_cleanup(query.message))
         return
 
     # 4. 하위 호환용 단일 선택 모드 (과거 메시지 버튼 클릭 대응)
@@ -728,7 +826,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         chosen_mode = parts[2]
 
         if not await _check_group_perm(target_chat_id):
-            await query.answer("대화방 관리자(방장/어드민)만 언어 모드를 설정할 수 있습니다.", show_alert=True)
+            await safe_answer("대화방 관리자(방장/어드민)만 언어 모드를 설정할 수 있습니다.", show_alert=True)
             return
 
         mode_name = get_lang_mode_display_name(chosen_mode)
@@ -737,33 +835,50 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         db.update_group_config(target_chat_id, lang_mode=chosen_mode)
         PENDING_LANG_PROMPTS.pop(target_chat_id, None)
         PENDING_LANG_SELECTIONS.pop(target_chat_id, None)
+        PENDING_LANG_INVITERS.pop(target_chat_id, None)
 
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        await safe_answer("✅ 언어 모드가 적용되었습니다.")
 
+        confirmed_text = (
+            f"✅ **대화방 번역 모드가 {mode_name}으로 설정되었습니다.** 이제 자유롭게 대화하시면 번역됩니다.\n\n"
+            f"💡 **사용 팁**:\n"
+            f"• 언제든 언어 변경: `/lang`\n"
+            f"• 대화방 기능 및 명령어 확인: `/help`"
+        )
+        msg_updated = False
         try:
-            sent_notice = await context.bot.send_message(
-                chat_id=target_chat_id,
-                text=(
-                    f"✅ 대화방 번역 모드가 **{mode_name}**으로 설정되었습니다. 이제 자유롭게 대화하시면 번역됩니다.\n\n"
-                    f"💡 **사용 팁**:\n"
-                    f"• 언제든 언어 변경: `/lang`\n"
-                    f"• 대화방 기능 및 명령어 확인: `/help`"
-                ),
-                parse_mode="Markdown"
-            )
-            if sent_notice:
-                async def _cleanup(msg):
-                    await asyncio.sleep(7)
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                asyncio.create_task(_cleanup(sent_notice))
+            await query.edit_message_text(confirmed_text, reply_markup=None, parse_mode="Markdown")
+            msg_updated = True
         except Exception:
-            pass
+            try:
+                clean_text = confirmed_text.replace("**", "").replace("`", "")
+                await query.edit_message_text(clean_text, reply_markup=None)
+                msg_updated = True
+            except Exception:
+                pass
+
+        if not msg_updated:
+            try:
+                thread_id = getattr(query.message, "message_thread_id", None)
+                kwargs = {"parse_mode": "Markdown"}
+                if thread_id:
+                    kwargs["message_thread_id"] = thread_id
+                await context.bot.send_message(
+                    chat_id=target_chat_id,
+                    text=confirmed_text,
+                    **kwargs
+                )
+            except Exception:
+                pass
+
+        if query.message:
+            async def _cleanup(msg):
+                await asyncio.sleep(10)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_cleanup(query.message))
         return
 
     # 이하 총괄 관리자(Super Admin) 전용 명령들
@@ -836,7 +951,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         if lang_code in current_set:
             if len(current_set) <= 1:
-                await query.answer("⚠️ 최소 1개 이상의 번역 언어가 선택되어 있어야 합니다.", show_alert=True)
+                await safe_answer("⚠️ 최소 1개 이상의 번역 언어가 선택되어 있어야 합니다.", show_alert=True)
                 return
             current_set.remove(lang_code)
         else:
@@ -857,7 +972,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         db.update_group_config(target_chat_id, lang_mode=new_mode)
         mode_str = get_lang_mode_display_name(new_mode)
-        await query.answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!")
+        await safe_answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!")
 
         card_text, reply_markup = build_admin_group_card(target_chat_id)
         await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
@@ -878,7 +993,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         db.update_group_config(target_chat_id, lang_mode=new_mode)
         mode_str = get_lang_mode_display_name(new_mode)
-        await query.answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!", show_alert=True)
+        await safe_answer(f"대화방 언어가 '{mode_str}'(으)로 변경되었습니다!", show_alert=True)
 
         card_text, reply_markup = build_admin_group_card(target_chat_id)
         await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
@@ -888,17 +1003,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         conf = db.get_group_config(target_chat_id)
         new_state = not conf.get("is_enabled", True)
         db.update_group_config(target_chat_id, is_enabled=new_state)
-        await query.answer(f"번역 스위치가 {'ON' if new_state else 'OFF'} 되었습니다.", show_alert=True)
+        await safe_answer(f"번역 스위치가 {'ON' if new_state else 'OFF'} 되었습니다.", show_alert=True)
 
         card_text, reply_markup = build_admin_group_card(target_chat_id)
         await query.edit_message_text(card_text, reply_markup=reply_markup, parse_mode="HTML")
 
     elif action == "adm_export_map":
+        import json
         mapping = db.export_group_lang_map()
         if not mapping:
-            await query.answer("등록된 대화방 설정이 없습니다.", show_alert=True)
+            await safe_answer("등록된 대화방 설정이 없습니다.", show_alert=True)
             return
-        compact_str = ", ".join([f"{k}:{v}" for k, v in mapping.items()])
+        compact_str = json.dumps(mapping, ensure_ascii=False, separators=(",", ":"))
         export_text = (
             "📋 <b>Render 재배포 영구 보존용 환경변수</b>\n\n"
             "Render 서버가 업데이트되어 재배포되더라도 방별 번역 설정이 날아가지 않도록 "
@@ -917,6 +1033,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "adm_back":
         text, reply_markup = build_groups_menu()
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+
+    if not has_answered:
+        await safe_answer()
 
 
 def build_admin_group_card(target_chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -1149,12 +1268,13 @@ async def cmd_export_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
         await safe_reply(message, "⚠️ 총괄 관리자 권한이 필요합니다.")
         return
 
+    import json
     mapping = db.export_group_lang_map()
     if not mapping:
         await safe_reply(message, "현재 등록된 대화방 설정이 없습니다.")
         return
 
-    compact_str = ", ".join([f"{k}:{v}" for k, v in mapping.items()])
+    compact_str = json.dumps(mapping, ensure_ascii=False, separators=(",", ":"))
     msg = (
         "📋 <b>Render 재배포 영구 보존용 환경변수 (GROUP_LANG_MAP)</b>\n\n"
         "Render 서버가 업데이트되어 재배포되더라도 방별 번역 설정이 날아가지 않도록 "
@@ -1618,6 +1738,9 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if prompt_msg:
             PENDING_LANG_PROMPTS[chat.id] = prompt_msg.message_id
+            user = update.effective_user
+            if user and getattr(user, "id", None):
+                PENDING_LANG_INVITERS[chat.id] = user.id
         return
 
     # 직접 언어 인자를 입력한 경우 (예: /lang en vi, /lang 영어 중국어, /lang all)
@@ -1640,6 +1763,7 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.set_group_allowed(chat.id, True, chat.title or "")
     db.update_group_config(chat.id, lang_mode=new_mode)
     PENDING_LANG_SELECTIONS.pop(chat.id, None)
+    PENDING_LANG_INVITERS.pop(chat.id, None)
 
     # 대기 중인 언어 선택 안내 카드가 있다면 자동 삭제
     if chat.id in PENDING_LANG_PROMPTS:
@@ -2082,8 +2206,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Translating in chat_id={chat.id} to {[t[0] for t in targets]} (has_photo={has_photo})")
 
-    # 동기 HTTP 번역 요청을 비동기 스레드 풀에서 병렬(asyncio.gather) 실행하여 이벤트 루프 블로킹 방지 및 지연시간 50% 단축
-    async def _do_translate(target_code: str, flag: str):
+    # 동기 HTTP 번역 요청을 비동기 스레드 풀에서 병렬 실행하되, 순간 폭주(429) 방지를 위해 미세 시차(0.15s) 적용
+    async def _do_translate(idx: int, target_code: str, flag: str):
+        if idx > 0:
+            await asyncio.sleep(idx * 0.15)
         try:
             translated = await asyncio.to_thread(
                 translation_service.translate,
@@ -2096,7 +2222,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Translation error to {target_code}: {e}")
         return None
 
-    tasks = [_do_translate(target_code, flag) for target_code, flag in targets]
+    tasks = [_do_translate(idx, target_code, flag) for idx, (target_code, flag) in enumerate(targets)]
     gathered_results = await asyncio.gather(*tasks)
     results = [r for r in gathered_results if r]
 

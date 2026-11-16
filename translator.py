@@ -1,13 +1,29 @@
 import re
 import json
+import time
+import random
 import logging
+import threading
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from typing import Optional, List, Tuple, Set, Dict
 import deepl
 from deep_translator import GoogleTranslator
 
 logger = logging.getLogger(__name__)
+
+# 번역 결과 인메모리 캐시 (동일 문장 반복 번역 시 외부 API 호출 0회 보장)
+_TRANSLATION_CACHE: OrderedDict = OrderedDict()
+_TRANSLATION_CACHE_LOCK = threading.Lock()
+MAX_TRANSLATION_CACHE_SIZE = 3000
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
 
 # URL 및 멘션 정규식
 URL_PATTERN = re.compile(r'https?://\S+|www\.\S+')
@@ -343,18 +359,77 @@ def determine_translation_plan(
     return (targets, text)
 
 
+def _get_cached_translation(text: str, target_lang: str) -> Optional[str]:
+    key = (text.strip(), target_lang.lower().strip())
+    with _TRANSLATION_CACHE_LOCK:
+        if key in _TRANSLATION_CACHE:
+            _TRANSLATION_CACHE.move_to_end(key)
+            return _TRANSLATION_CACHE[key]
+    return None
+
+
+def _set_cached_translation(text: str, target_lang: str, translated: str):
+    if not text or not translated:
+        return
+    key = (text.strip(), target_lang.lower().strip())
+    with _TRANSLATION_CACHE_LOCK:
+        _TRANSLATION_CACHE[key] = translated
+        _TRANSLATION_CACHE.move_to_end(key)
+        if len(_TRANSLATION_CACHE) > MAX_TRANSLATION_CACHE_SIZE:
+            _TRANSLATION_CACHE.popitem(last=False)
+
+
 def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
-    """Google GTX POST API 번역 (S6: 최대 입력 길이 4000자 제한 적용)"""
+    """Google GTX / TW-OB POST API 번역 (다중 엔드포인트 폴백 적용)"""
+    if len(text) > 4000:
+        text = text[:4000]
+
+    endpoints = [
+        ("https://translate.googleapis.com/translate_a/single", "gtx"),
+        ("https://translate.google.com/translate_a/single", "tw-ob"),
+    ]
+    for url, client_id in endpoints:
+        try:
+            params = {
+                "client": client_id,
+                "sl": "auto",
+                "tl": target_lang,
+                "dt": "t",
+                "q": text,
+            }
+            post_data = urllib.parse.urlencode(params).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=post_data,
+                headers={
+                    "User-Agent": random.choice(USER_AGENTS),
+                    "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+                }
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content = response.read().decode("utf-8")
+                data = json.loads(content)
+                if data and isinstance(data, list) and len(data) > 0 and data[0]:
+                    parts = [p[0] for p in data[0] if p and len(p) > 0 and p[0]]
+                    result = "".join(parts).strip()
+                    if result and "Error 500" not in result and "That's an error" not in result:
+                        return result
+        except Exception as e:
+            logger.debug(f"GTX ({client_id}) error for target {target_lang}: {type(e).__name__}")
+    return None
+
+
+def translate_google_clients5(text: str, target_lang: str) -> Optional[str]:
+    """Google Clients5 (dict-chrome-ex) 대체 도메인 번역 (429 우회용 별도 쿼터 도메인)"""
     if len(text) > 4000:
         text = text[:4000]
 
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
+        url = "https://clients5.google.com/translate_a/t"
         params = {
-            "client": "gtx",
+            "client": "dict-chrome-ex",
             "sl": "auto",
             "tl": target_lang,
-            "dt": "t",
             "q": text,
         }
         post_data = urllib.parse.urlencode(params).encode("utf-8")
@@ -362,26 +437,135 @@ def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
             url,
             data=post_data,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": random.choice(USER_AGENTS),
                 "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
             }
         )
-        with urllib.request.urlopen(req, timeout=12) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             content = response.read().decode("utf-8")
             data = json.loads(content)
-            if data and isinstance(data, list) and len(data) > 0 and data[0]:
-                parts = [p[0] for p in data[0] if p and len(p) > 0 and p[0]]
-                result = "".join(parts).strip()
-                if result and "Error 500" not in result and "That's an error" not in result:
-                    return result
+            if isinstance(data, list) and len(data) > 0:
+                first = data[0]
+                if isinstance(first, str) and first.strip():
+                    return first.strip()
+                if isinstance(first, list) and len(first) > 0 and isinstance(first[0], str):
+                    return first[0].strip()
     except Exception as e:
-        # S8: 에러 로그에 원문 텍스트 미포함 (언어 코드만 기록)
-        logger.error(f"GTX translation error for target {target_lang}: {type(e).__name__}")
+        logger.debug(f"Clients5 translation error for target {target_lang}: {type(e).__name__}")
     return None
 
 
+def translate_lingva(text: str, target_lang: str) -> Optional[str]:
+    """Lingva 다중 퍼블릭 미러 API 번역 (렌더 공용 IP 차단 완전 우회)"""
+    if len(text) > 2500:
+        text = text[:2500]
+
+    lingva_target = "zh" if target_lang.lower() in ["zh-cn", "zh"] else target_lang.lower()
+    encoded_query = urllib.parse.quote(text, safe="")
+
+    mirrors = [
+        "https://translate.plausibility.cloud",
+        "https://lingva.lunar.icu",
+        "https://lingva.ml",
+    ]
+    for base_url in mirrors:
+        try:
+            url = f"{base_url}/api/v1/auto/{lingva_target}/{encoded_query}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": random.choice(USER_AGENTS)}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content = response.read().decode("utf-8")
+                data = json.loads(content)
+                if isinstance(data, dict) and data.get("translation"):
+                    res = str(data["translation"]).strip()
+                    if res:
+                        return res
+        except Exception as e:
+            logger.debug(f"Lingva ({base_url}) error for {target_lang}: {type(e).__name__}")
+    return None
+
+
+def translate_mymemory(text: str, target_lang: str) -> Optional[str]:
+    """MyMemory 독립 번역 API (구글 외 독립 엔진 폴백, 문단 분할 지원)"""
+    src_detected = detect_source_language(text) or "KO"
+    src_map = {
+        "KO": "ko",
+        "EN": "en",
+        "VI": "vi",
+        "ZH": "zh-CN",
+        "ES": "es",
+    }
+    src_code = src_map.get(src_detected.upper(), "ko")
+    tgt_code = "zh-CN" if target_lang.lower() in ["zh", "zh-cn"] else target_lang
+
+    if src_code.lower() == tgt_code.lower():
+        return None
+
+    # MyMemory는 요청당 500바이트 제한이 있으므로 줄/문장 단위로 안전 분할
+    chunks: List[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len((current + line).encode("utf-8")) <= 420:
+            current += line
+        else:
+            if current:
+                chunks.append(current)
+            # 한 줄 자체가 긴 경우 문장 단위로 추가 분할
+            if len(line.encode("utf-8")) > 420:
+                sentences = re.split(r'(?<=[.!?。])\s+', line)
+                sub = ""
+                for s in sentences:
+                    if len((sub + " " + s).encode("utf-8")) <= 420:
+                        sub = f"{sub} {s}".strip() if sub else s
+                    else:
+                        if sub:
+                            chunks.append(sub)
+                        sub = s[:140]
+                if sub:
+                    chunks.append(sub)
+                current = ""
+            else:
+                current = line
+    if current:
+        chunks.append(current)
+
+    translated_chunks: List[str] = []
+    for chunk in chunks[:8]:
+        chunk_clean = chunk.strip()
+        if not chunk_clean:
+            translated_chunks.append(chunk)
+            continue
+        try:
+            params = {
+                "q": chunk_clean,
+                "langpair": f"{src_code}|{tgt_code}",
+            }
+            url = f"https://api.mymemory.translated.net/get?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": random.choice(USER_AGENTS)}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content = response.read().decode("utf-8")
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    resp_data = data.get("responseData") or {}
+                    t_text = resp_data.get("translatedText")
+                    if t_text and "MYMEMORY WARNING" not in str(t_text).upper():
+                        translated_chunks.append(str(t_text).strip())
+                    else:
+                        return None
+        except Exception as e:
+            logger.debug(f"MyMemory error for {target_lang}: {type(e).__name__}")
+            return None
+
+    return "\n".join(translated_chunks).strip() if translated_chunks else None
+
+
 class UnifiedTranslationService:
-    """통합 번역 서비스"""
+    """통합 번역 서비스 (다중 엔진 자동 우회 및 LRU 캐시 탑재)"""
     def __init__(self, deepl_api_key: str = "", glossary_manager=None):
         self.deepl_api_key = deepl_api_key.strip() if deepl_api_key else ""
         self.glossary_manager = glossary_manager
@@ -395,24 +579,52 @@ class UnifiedTranslationService:
                 logger.warning(f"External API init failed: {type(e).__name__}")
 
     def get_engine_name(self) -> str:
-        base = "Primary API + GTX Engine" if self._deepl_translator else "GTX Translation Engine"
+        base = "Primary API + Multi-Fallback Engine" if self._deepl_translator else "Multi-Fallback Translation Engine"
         if self.glossary_manager and self.glossary_manager.is_enabled() and self.glossary_manager.loaded_count > 0:
             return f"{base} + 용어집({self.glossary_manager.loaded_count}개 적용)"
         return base
 
     def _translate_free(self, text: str, target_lang: str) -> Optional[str]:
-        gtx_res = translate_google_gtx(text, target_lang)
-        if gtx_res:
-            return gtx_res
+        # 0. 캐시 확인 (이미 번역된 적 있는 문장은 API 호출 없이 즉시 반환)
+        cached = _get_cached_translation(text, target_lang)
+        if cached:
+            return cached
 
+        # 1. Google GTX / TW-OB POST API
+        res = translate_google_gtx(text, target_lang)
+        if res:
+            _set_cached_translation(text, target_lang, res)
+            return res
+
+        # 2. Google Clients5 (dict-chrome-ex) 별도 도메인 우회
+        res = translate_google_clients5(text, target_lang)
+        if res:
+            _set_cached_translation(text, target_lang, res)
+            return res
+
+        # 3. Lingva 다중 퍼블릭 미러 API (Render IP 429 차단 완전 우회)
+        res = translate_lingva(text, target_lang)
+        if res:
+            _set_cached_translation(text, target_lang, res)
+            return res
+
+        # 4. deep_translator GoogleTranslator
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
             res = translator.translate(text)
             if res and "Error 500" not in res:
+                _set_cached_translation(text, target_lang, res)
                 return res
         except Exception as e:
-            logger.error(f"Fallback translator error: {type(e).__name__}")
+            logger.debug(f"GoogleTranslator error for {target_lang}: {type(e).__name__}")
 
+        # 5. MyMemory 독립 번역 API (최종 비구글 폴백)
+        res = translate_mymemory(text, target_lang)
+        if res:
+            _set_cached_translation(text, target_lang, res)
+            return res
+
+        logger.error(f"All translation engines failed for target {target_lang}")
         return None
 
     def translate(self, text: str, target_lang: str) -> Optional[str]:

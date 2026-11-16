@@ -31,7 +31,7 @@ def parse_emergency_admin_ids() -> List[int]:
 
 
 def parse_group_lang_map() -> Dict[int, str]:
-    """환경변수 GROUP_LANG_MAP 파싱 (JSON 또는 쉼표 구분 문자열 지원)"""
+    """환경변수 GROUP_LANG_MAP 파싱 (JSON 및 다중 언어 쉼표 문자열 '-100123:en,vi, -100456:ko-en' 완벽 지원)"""
     if not GROUP_LANG_MAP_RAW:
         return {}
     res = {}
@@ -46,6 +46,18 @@ def parse_group_lang_map() -> Dict[int, str]:
         pass
 
     try:
+        import re
+        # chat_id(음수/양수 숫자) : lang_mode(다음 chat_id: 패턴 직전까지, 내부 쉼표 en,vi 허용)
+        pattern = re.compile(r"(-?\d+)\s*:\s*([^:]+?)(?=(?:\s*,\s*-?\d+\s*:)|$)")
+        matches = list(pattern.finditer(GROUP_LANG_MAP_RAW))
+        if matches:
+            for m in matches:
+                c_id = int(m.group(1).strip())
+                l_mode = m.group(2).strip().rstrip(",").strip().lower()
+                if l_mode:
+                    res[c_id] = l_mode
+            return res
+
         for item in GROUP_LANG_MAP_RAW.split(","):
             if ":" in item:
                 k, v = item.split(":", 1)
