@@ -13,7 +13,7 @@ from deep_translator import GoogleTranslator
 
 logger = logging.getLogger(__name__)
 
-# 번역 결과 인메모리 캐시 (동일 문장 반복 번역 시 외부 API 호출 0회 보장)
+# 번역 결과 인메모리 캐시 (완전히 번역된 정상 결과만 캐싱)
 _TRANSLATION_CACHE: OrderedDict = OrderedDict()
 _TRANSLATION_CACHE_LOCK = threading.Lock()
 MAX_TRANSLATION_CACHE_SIZE = 3000
@@ -50,14 +50,14 @@ FILTERED_SHORT_RESPONSES = {
     "아멘", "amen", "아멘입니다", "아멘요",
     "샬롬", "shalom", "할렐루야", "hallelujah",
     "기도합니다", "축복합니다", "은혜롭습니다",
-    
+
     # 그룹 2: 일상 단답/확인
     "네", "넵", "넹", "넴", "예", "응", "어", "아니", "아뇨", "아닙니다",
     "오키", "오케이", "ㅇㅋ", "알겠습니다", "확인했습니다",
     "감사", "감사합니다", "고마워", "고마워요", "수고", "수고하셨습니다", "수고하세요",
     "축하", "축하합니다", "축하해요", "축하드려요",
     "하이", "바이", "굿", "좋아요", "대박",
-    
+
     # 그룹 3: 영문 단답
     "ok", "okay", "yes", "yeah", "yep", "no", "nope",
     "thx", "thanks", "thankyou", "thank",
@@ -108,7 +108,7 @@ def is_trivial_reaction(text: str) -> bool:
 
 
 def detect_source_language(text: str) -> Optional[str]:
-    """텍스트의 언어를 감지하여 'KO', 'VI', 'EN' 중 하나를 반환"""
+    """텍스트의 언어를 감지하여 'KO', 'VI', 'EN', 'ZH', 'ES' 중 하나를 반환"""
     if not text or not text.strip():
         return None
 
@@ -120,7 +120,7 @@ def detect_source_language(text: str) -> Optional[str]:
         return None
 
     # 단순 기호/숫자/이모지만 있는 경우 제외
-    if (not re.search(r'[가-힣a-zA-Z]', cleaned) 
+    if (not re.search(r'[가-힣a-zA-Z]', cleaned)
             and not LANG_SPECIFIC_CHAR_PATTERN.search(cleaned)
             and not CHINESE_CHAR_PATTERN.search(cleaned)
             and not SPANISH_CHAR_PATTERN.search(cleaned)):
@@ -180,10 +180,8 @@ def parse_active_languages(mode: str) -> Set[str]:
     if m in ["all", "5", "5개국어", "5국어", "전체", "모두"]:
         return set(ORDERED_TARGET_LANGS)
     if m in ["3", "3개국어", "3국어", "ko-en-vi"]:
-        # 3개국어: 한국어 + 영어 + 베트남어
         return {"en", "vi"}
     if m in ["4", "4개국어", "4국어", "ko-en-vi-zh"]:
-        # 4개국어: 한국어 + 영어 + 베트남어 + 중국어
         return {"en", "vi", "zh"}
     if m in ["ko-en", "en", "영어"]:
         return {"en"}
@@ -221,9 +219,6 @@ def parse_active_languages(mode: str) -> Set[str]:
 def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[str, str]]:
     """
     모드별(단일/다중/5개국어 전체) 번역 대상 언어 및 심볼 반환
-    - source_lang == 'KO': 활성화된 모든 대상 외국어(선택된 언어들) 동시 번역 반환
-    - source_lang == 'EN': 한국어([('ko', '🇰🇷')]) + 다른 활성화된 외국어(베트남, 중국, 스페인 등) 함께 번역
-    - source_lang in ['VI', 'ZH', 'ES']: 한국어([('ko', '🇰🇷')])로 번역
     """
     active = parse_active_languages(mode)
     if not active:
@@ -254,8 +249,6 @@ def get_translation_targets(source_lang: str, mode: str = "all") -> List[Tuple[s
 def is_bilingual_ko_en(text: str) -> bool:
     """
     한글과 영문이 함께 수록된 양방향 게시글(생명의 어록 등) 판별
-    - 한글 음절 15자 이상 & 영문 단어 10단어 이상
-    - 또는 어록 관련 키워드가 포함된 경우 완화된 기준(한글 8자 이상, 영문 6단어 이상) 적용
     """
     if not text:
         return False
@@ -278,7 +271,6 @@ def is_bilingual_ko_en(text: str) -> bool:
 def is_image_quote_caption(text: str, has_photo: bool = False) -> bool:
     """
     사진과 함께 올라온 영문 생명의 어록 캡션인지 판별
-    (사진에 한글이 이미 그래픽으로 박혀 있고 캡션은 영어인 유형)
     """
     if not text or not has_photo:
         return False
@@ -293,7 +285,6 @@ def is_image_quote_caption(text: str, has_photo: bool = False) -> bool:
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     ko_chars = len(re.findall(r'[가-힣]', text))
 
-    # 캡션에 한글이 거의 없고, 영문이 풍부하며 어록 키워드가 있거나 영문 단어 15단어 이상
     if ko_chars < 5:
         if is_quote or en_words >= 15:
             return True
@@ -316,9 +307,6 @@ def determine_translation_plan(
 ) -> Tuple[List[Tuple[str, str]], str]:
     """
     메시지 내용 및 사진 첨부 여부에 따라 번역 대상 언어와 번역할 텍스트 결정
-    반환값: (targets, text_to_translate)
-    - targets: [(lang_code, flag_emoji), ...]
-    - text_to_translate: 실제로 번역기에 전달할 텍스트
     """
     active = parse_active_languages(mode)
     if not active:
@@ -326,7 +314,6 @@ def determine_translation_plan(
 
     # 1. 유형 1: 한글+영어 동시 수록된 텍스트 어록
     if is_bilingual_ko_en(text):
-        # 이미 영문이 본문에 제공되었으므로 영어는 번역에서 제외하고 나머지 활성 외국어 번역
         remaining_langs = [k for k in ["vi", "zh", "es"] if k in active]
         if remaining_langs:
             ko_section = extract_korean_section(text)
@@ -335,12 +322,10 @@ def determine_translation_plan(
                 for k in remaining_langs
             ]
             return (targets, ko_section)
-        # 영어 외에 다른 활성 언어가 없는 경우(예: 한-영 전용 방) 번역 불필요 (스킵)
         return ([], "")
 
     # 2. 유형 2: 사진(한글 이미지) + 영문 캡션 어록
     if is_image_quote_caption(text, has_photo=has_photo):
-        # 사진에 한글이 있고 캡션에 영어가 있으므로 영어 제외 나머지 활성 외국어 번역
         remaining_langs = [k for k in ["vi", "zh", "es"] if k in active]
         if remaining_langs:
             targets = [
@@ -359,17 +344,58 @@ def determine_translation_plan(
     return (targets, text)
 
 
+def _get_explicit_source_code(text: str) -> str:
+    """원문 텍스트에서 명시적 소스 언어 코드 추출 ('ko', 'en', 'vi', 'zh-CN', 'es' 또는 'auto')"""
+    detected = detect_source_language(text)
+    mapping = {
+        "KO": "ko",
+        "EN": "en",
+        "VI": "vi",
+        "ZH": "zh-CN",
+        "ES": "es",
+    }
+    return mapping.get(detected or "", "auto")
+
+
+def _has_untranslated_source(source_text: str, translated_text: str, target_lang: str) -> bool:
+    """
+    번역이 중간에 끊기거나 일부 문장이 원문 그대로 남은 현상(Partial Translation) 감지:
+    - 한국어 원문을 외국어(en, vi, zh-CN, es)로 번역했는데 결과물에 한글 2글자 이상이 남아있는 경우 True 반환
+    - 외국어 원문을 한국어(ko)로 번역했는데 원문과 동일하고 한글이 전혀 없는 경우 True 반환
+    """
+    if not translated_text or not translated_text.strip():
+        return True
+
+    tgt = target_lang.lower().strip()
+    if tgt != "ko":
+        # 원문에 한글이 있었는데 번역 결과에도 여전히 연속된 한글이 남아있다면 미번역된 문장이 존재함
+        if re.search(r'[가-힣]{2,}', source_text) and re.search(r'[가-힣]{2,}', translated_text):
+            return True
+    else:
+        # 한국어로 번역해야 하는데 원문에 한글이 없었고 번역 결과에도 한글이 전혀 없다면 미번역 상태
+        if not re.search(r'[가-힣]', source_text) and not re.search(r'[가-힣]', translated_text):
+            return True
+
+    return False
+
+
 def _get_cached_translation(text: str, target_lang: str) -> Optional[str]:
     key = (text.strip(), target_lang.lower().strip())
     with _TRANSLATION_CACHE_LOCK:
         if key in _TRANSLATION_CACHE:
-            _TRANSLATION_CACHE.move_to_end(key)
-            return _TRANSLATION_CACHE[key]
+            val = _TRANSLATION_CACHE[key]
+            if not _has_untranslated_source(text, val, target_lang):
+                _TRANSLATION_CACHE.move_to_end(key)
+                return val
+            else:
+                del _TRANSLATION_CACHE[key]
     return None
 
 
 def _set_cached_translation(text: str, target_lang: str, translated: str):
     if not text or not translated:
+        return
+    if _has_untranslated_source(text, translated, target_lang):
         return
     key = (text.strip(), target_lang.lower().strip())
     with _TRANSLATION_CACHE_LOCK:
@@ -400,10 +426,8 @@ def _parse_google_response(data) -> Optional[str]:
     # 2. 리스트 구조
     if isinstance(data, list) and len(data) > 0:
         first = data[0]
-        # 2-a: ["번역문"] 또는 ["번역문", "ko"]
         if isinstance(first, str) and first.strip():
             return first.strip()
-        # 2-b: [[["번역문1", "원문1"], ["번역문2", "원문2"]], ...] 또는 [["번역문", "ko"]]
         if isinstance(first, list) and len(first) > 0:
             if isinstance(first[0], str) and first[0].strip():
                 return first[0].strip()
@@ -418,14 +442,15 @@ def _parse_google_response(data) -> Optional[str]:
 
 
 def translate_google_clients5(text: str, target_lang: str) -> Optional[str]:
-    """Google Clients5 (dict-chrome-ex) 번역 — dict(sentences) 및 list 응답 모두 처리"""
+    """Google Clients5 (dict-chrome-ex) 번역 — 명시적 소스 언어 지정 및 dict/list 응답 모두 처리"""
     if len(text) > 4000:
         text = text[:4000]
 
+    src_code = _get_explicit_source_code(text)
     try:
         query_params = urllib.parse.urlencode({
             "client": "dict-chrome-ex",
-            "sl": "auto",
+            "sl": src_code,
             "tl": target_lang,
             "dt": "t",
             "dj": "1",
@@ -452,10 +477,11 @@ def translate_google_clients5(text: str, target_lang: str) -> Optional[str]:
 
 
 def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
-    """Google Android(at) / GTX / WebApp 다중 클라이언트 번역"""
+    """Google Android(at) / GTX / KR 다중 클라이언트 번역"""
     if len(text) > 4000:
         text = text[:4000]
 
+    src_code = _get_explicit_source_code(text)
     endpoints = [
         (
             "https://translate.google.com/translate_a/single",
@@ -477,7 +503,7 @@ def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
         try:
             query_params = urllib.parse.urlencode({
                 "client": client_id,
-                "sl": "auto",
+                "sl": src_code,
                 "tl": target_lang,
                 "dt": "t",
                 "dj": "1",
@@ -504,14 +530,16 @@ def translate_google_gtx(text: str, target_lang: str) -> Optional[str]:
 
 
 def translate_lingva(text: str, target_lang: str) -> Optional[str]:
-    """Lingva 다중 퍼블릭 미러 API 번역 (줄바꿈 %0A 경로 오류 방지를 위해 문단 단위 처리)"""
+    """Lingva 다중 퍼블릭 미러 API 번역 (줄바꿈 보존 및 문단 단위 안전 처리)"""
     if len(text) > 2500:
         text = text[:2500]
 
+    src_raw = _get_explicit_source_code(text)
+    lingva_src = "zh" if src_raw.lower() in ["zh-cn", "zh"] else src_raw.lower()
     lingva_target = "zh" if target_lang.lower() in ["zh-cn", "zh"] else target_lang.lower()
-    # URL 경로에 %0A(줄바꿈)나 슬래시가 들어가면 400/404가 발생하므로 문단별로 분리
-    paragraphs = [p.strip() for p in text.splitlines() if p.strip()]
-    if not paragraphs:
+
+    lines = text.splitlines()
+    if not any(line.strip() for line in lines):
         return None
 
     mirrors = [
@@ -524,11 +552,14 @@ def translate_lingva(text: str, target_lang: str) -> Optional[str]:
         try:
             out_lines: List[str] = []
             mirror_ok = True
-            for p in paragraphs:
-                # 슬래시(/)는 공백으로 치환 후 URL 인코딩
+            for raw_line in lines:
+                p = raw_line.strip()
+                if not p:
+                    out_lines.append("")
+                    continue
                 safe_p = p.replace("/", " ")
                 encoded_query = urllib.parse.quote(safe_p, safe="")
-                url = f"{base_url}/api/v1/auto/{lingva_target}/{encoded_query}"
+                url = f"{base_url}/api/v1/{lingva_src}/{lingva_target}/{encoded_query}"
                 req = urllib.request.Request(
                     url,
                     headers={"User-Agent": random.choice(USER_AGENTS)}
@@ -541,15 +572,17 @@ def translate_lingva(text: str, target_lang: str) -> Optional[str]:
                     else:
                         mirror_ok = False
                         break
-            if mirror_ok and out_lines:
-                return "\n\n".join(out_lines)
+            if mirror_ok and any(line.strip() for line in out_lines):
+                return "\n".join(out_lines).strip()
         except Exception as e:
             logger.warning(f"Lingva ({base_url}) error for {target_lang}: {type(e).__name__}")
     return None
 
 
 def translate_mymemory(text: str, target_lang: str) -> Optional[str]:
-    """MyMemory 독립 번역 API (구글 외 독립 엔진 폴백, 250바이트 안전 분할 및 쿼터 확장 파라미터 적용)"""
+    """
+    MyMemory 독립 번역 API (줄바꿈 문단별로 개별 요청하여 중간 문장 누락 원천 방지)
+    """
     src_detected = detect_source_language(text) or "KO"
     src_map = {
         "KO": "ko",
@@ -564,81 +597,145 @@ def translate_mymemory(text: str, target_lang: str) -> Optional[str]:
     if src_code.lower() == tgt_code.lower():
         return None
 
-    # 문단 및 문장 단위로 240바이트 이하 안전 분할
-    chunks: List[str] = []
+    def _call_mymemory_single(segment: str) -> Optional[str]:
+        # 물결표(~?) 등이 번역 메모리 매칭을 방해하지 않도록 정리
+        cleaned_seg = re.sub(r'~+([?!.])', r'\1', segment.strip())
+        params = {
+            "q": cleaned_seg,
+            "langpair": f"{src_code}|{tgt_code}",
+            "de": "bot_support@workspace.org",
+        }
+        url = f"https://api.mymemory.translated.net/get?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": random.choice(USER_AGENTS)}
+        )
+        with urllib.request.urlopen(req, timeout=8) as response:
+            content = response.read().decode("utf-8")
+            data = json.loads(content)
+            if isinstance(data, dict):
+                resp_data = data.get("responseData") or {}
+                t_text = resp_data.get("translatedText")
+                if (
+                    t_text
+                    and "MYMEMORY WARNING" not in str(t_text).upper()
+                    and "QUERY LENGTH LIMIT" not in str(t_text).upper()
+                ):
+                    return str(t_text).strip()
+        return None
+
+    # 줄 단위로 독립 분할 (두 줄 사이에 빈 줄이 있을 때 뒷문장이 통째로 한국어로 남는 현상 방지)
+    output_lines: List[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
+            output_lines.append("")
             continue
-        if len(line.encode("utf-8")) <= 240:
-            chunks.append(line)
+
+        # 한 줄이 220바이트 이하이면 그 줄만 단독 번역
+        if len(line.encode("utf-8")) <= 220:
+            try:
+                t_line = _call_mymemory_single(line)
+                if not t_line:
+                    return None
+                output_lines.append(t_line)
+            except Exception as e:
+                logger.warning(f"MyMemory line error for {target_lang}: {type(e).__name__}")
+                return None
         else:
+            # 긴 문단은 문장 단위로 쪼개어 각각 번역 후 합침
             sentences = re.split(r'(?<=[.!?。])\s+', line)
+            sub_chunks: List[str] = []
             sub = ""
             for s in sentences:
                 s = s.strip()
                 if not s:
                     continue
                 candidate = f"{sub} {s}".strip() if sub else s
-                if len(candidate.encode("utf-8")) <= 240:
+                if len(candidate.encode("utf-8")) <= 220:
                     sub = candidate
                 else:
                     if sub:
-                        chunks.append(sub)
-                    # 단일 문장이 240바이트를 넘는 경우 어절 단위로 분할
-                    if len(s.encode("utf-8")) > 240:
+                        sub_chunks.append(sub)
+                    if len(s.encode("utf-8")) > 220:
                         words = s.split()
                         w_sub = ""
                         for w in words:
                             w_cand = f"{w_sub} {w}".strip() if w_sub else w
-                            if len(w_cand.encode("utf-8")) <= 240:
+                            if len(w_cand.encode("utf-8")) <= 220:
                                 w_sub = w_cand
                             else:
                                 if w_sub:
-                                    chunks.append(w_sub)
-                                w_sub = w[:70]
+                                    sub_chunks.append(w_sub)
+                                w_sub = w[:65]
                         sub = w_sub
                     else:
                         sub = s
             if sub:
-                chunks.append(sub)
+                sub_chunks.append(sub)
 
-    if not chunks:
-        return None
-
-    translated_chunks: List[str] = []
-    for chunk_clean in chunks[:10]:
-        try:
-            params = {
-                "q": chunk_clean,
-                "langpair": f"{src_code}|{tgt_code}",
-                "de": "bot_support@workspace.org",
-            }
-            url = f"https://api.mymemory.translated.net/get?{urllib.parse.urlencode(params)}"
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": random.choice(USER_AGENTS)}
-            )
-            with urllib.request.urlopen(req, timeout=8) as response:
-                content = response.read().decode("utf-8")
-                data = json.loads(content)
-                if isinstance(data, dict):
-                    resp_data = data.get("responseData") or {}
-                    t_text = resp_data.get("translatedText")
-                    if t_text and "MYMEMORY WARNING" not in str(t_text).upper() and "QUERY LENGTH LIMIT" not in str(t_text).upper():
-                        translated_chunks.append(str(t_text).strip())
-                    else:
-                        logger.warning(f"MyMemory rejected chunk for {target_lang}: {str(t_text)[:60]}")
+            translated_line_parts: List[str] = []
+            for sc in sub_chunks[:10]:
+                try:
+                    t_sc = _call_mymemory_single(sc)
+                    if not t_sc:
                         return None
-        except Exception as e:
-            logger.warning(f"MyMemory error for {target_lang}: {type(e).__name__}")
-            return None
+                    translated_line_parts.append(t_sc)
+                except Exception as e:
+                    logger.warning(f"MyMemory chunk error for {target_lang}: {type(e).__name__}")
+                    return None
+            output_lines.append(" ".join(translated_line_parts))
 
-    return "\n".join(translated_chunks).strip() if translated_chunks else None
+    result = "\n".join(output_lines).strip()
+    return result if result else None
+
+
+def _translate_single_segment_any_engine(segment: str, target_lang: str) -> Optional[str]:
+    """단일 줄/문장에 대해 부분 미번역 보정용으로 순차 엔진 번역 시도"""
+    clean_seg = re.sub(r'~+([?!.])', r'\1', segment.strip())
+    for fn in (
+        translate_google_clients5,
+        translate_google_gtx,
+        translate_lingva,
+        translate_mymemory,
+    ):
+        res = fn(clean_seg, target_lang)
+        if res and not _has_untranslated_source(clean_seg, res, target_lang):
+            return res
+    try:
+        src_code = _get_explicit_source_code(clean_seg)
+        res = GoogleTranslator(source=src_code, target=target_lang).translate(clean_seg)
+        if res and not _has_untranslated_source(clean_seg, res, target_lang):
+            return res
+    except Exception:
+        pass
+    return None
+
+
+def _repair_partial_translation(source_text: str, translated_text: str, target_lang: str) -> str:
+    """
+    번역된 결과물의 일부 줄에 한국어 원문이 번역되지 않고 그대로 남아있는 경우(예: 첫 줄만 번역되고 둘째 줄은 한글 유지),
+    해당 줄만 개별적으로 다시 번역하여 완결된 번역문으로 복구합니다.
+    """
+    if not translated_text or target_lang.lower().strip() == "ko":
+        return translated_text
+
+    if not re.search(r'[가-힣]{2,}', translated_text):
+        return translated_text
+
+    repaired_lines: List[str] = []
+    for line in translated_text.splitlines():
+        if re.search(r'[가-힣]{2,}', line):
+            fixed = _translate_single_segment_any_engine(line, target_lang)
+            repaired_lines.append(fixed if fixed else line)
+        else:
+            repaired_lines.append(line)
+
+    return "\n".join(repaired_lines).strip()
 
 
 class UnifiedTranslationService:
-    """통합 번역 서비스 (다중 엔진 자동 우회 및 LRU 캐시 탑재)"""
+    """통합 번역 서비스 (다중 엔진 자동 우회, 부분 미번역 자동 복구 및 LRU 캐시 탑재)"""
     def __init__(self, deepl_api_key: str = "", glossary_manager=None):
         self.deepl_api_key = deepl_api_key.strip() if deepl_api_key else ""
         self.glossary_manager = glossary_manager
@@ -658,42 +755,40 @@ class UnifiedTranslationService:
         return base
 
     def _translate_free(self, text: str, target_lang: str) -> Optional[str]:
-        # 0. 캐시 확인 (이미 번역된 적 있는 문장은 API 호출 없이 즉시 반환)
+        # 0. 캐시 확인 (완전히 번역된 문장은 API 호출 없이 즉시 반환)
         cached = _get_cached_translation(text, target_lang)
         if cached:
             return cached
 
-        # 1. Google Clients5 (dict-chrome-ex) 별도 도메인 최우선 시도
-        res = translate_google_clients5(text, target_lang)
-        if res:
-            _set_cached_translation(text, target_lang, res)
-            return res
+        engines = [
+            translate_google_clients5,
+            translate_google_gtx,
+            translate_lingva,
+            translate_mymemory,
+        ]
 
-        # 2. Google Android(at) / GTX / KR 다중 엔드포인트
-        res = translate_google_gtx(text, target_lang)
-        if res:
-            _set_cached_translation(text, target_lang, res)
-            return res
+        for engine_fn in engines:
+            res = engine_fn(text, target_lang)
+            if res:
+                # 일부 줄에 한글이 번역되지 않고 남아있다면 해당 줄만 개별 재번역하여 복구
+                if _has_untranslated_source(text, res, target_lang):
+                    res = _repair_partial_translation(text, res, target_lang)
+                # 완전히 번역된 경우에만 채택 및 캐시 저장
+                if not _has_untranslated_source(text, res, target_lang):
+                    _set_cached_translation(text, target_lang, res)
+                    return res
 
-        # 3. Lingva 다중 퍼블릭 미러 API (문단 분할 안전 처리)
-        res = translate_lingva(text, target_lang)
-        if res:
-            _set_cached_translation(text, target_lang, res)
-            return res
-
-        # 4. MyMemory 독립 번역 API (비구글 독립 엔진)
-        res = translate_mymemory(text, target_lang)
-        if res:
-            _set_cached_translation(text, target_lang, res)
-            return res
-
-        # 5. deep_translator GoogleTranslator
+        # 최종 폴백: deep_translator GoogleTranslator
         try:
-            translator = GoogleTranslator(source='auto', target=target_lang)
+            src_code = _get_explicit_source_code(text)
+            translator = GoogleTranslator(source=src_code, target=target_lang)
             res = translator.translate(text)
             if res and "Error 500" not in res:
-                _set_cached_translation(text, target_lang, res)
-                return res
+                if _has_untranslated_source(text, res, target_lang):
+                    res = _repair_partial_translation(text, res, target_lang)
+                if not _has_untranslated_source(text, res, target_lang):
+                    _set_cached_translation(text, target_lang, res)
+                    return res
         except Exception as e:
             logger.warning(f"GoogleTranslator error for {target_lang}: {type(e).__name__}")
 
@@ -725,7 +820,7 @@ class UnifiedTranslationService:
                 result = self._deepl_translator.translate_text(source_to_translate, target_lang=deepl_target)
                 raw_result = result.text
             except Exception as e:
-                logger.warning(f"Primary API error ({type(e).__name__}) -> Fallback to GTX")
+                logger.warning(f"Primary API error ({type(e).__name__}) -> Fallback to Multi-Engine")
                 raw_result = self._translate_free(source_to_translate, target_lang)
         else:
             raw_result = self._translate_free(source_to_translate, target_lang)
@@ -742,5 +837,3 @@ class UnifiedTranslationService:
                 logger.warning(f"Glossary post-processing error: {e}")
 
         return raw_result
-
-
